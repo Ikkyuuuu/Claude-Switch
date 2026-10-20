@@ -1,0 +1,267 @@
+{
+  "name": "claude-account-roster",
+  "displayName": "Claude Switch (unofficial)",
+  "description": "Switch which Claude account the Claude Code extension and CLI use. Not affiliated with Anthropic.",
+  "version": "0.8.0",
+  "publisher": "your-publisher-id",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ikkyuuuu/Claude-Switch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Ikkyuuuu/Claude-Switch/issues"
+  },
+  "homepage": "https://github.com/Ikkyuuuu/Claude-Switch#readme",
+  "private": true,
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1B1838",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeRoster",
+          "title": "Claude Switch",
+          "icon": "resources/roster.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeRoster": [
+        {
+          "type": "webview",
+          "id": "claudeRoster.accounts",
+          "name": "Accounts",
+          "contextualTitle": "Claude Switch"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeRoster.switch",
+        "title": "Switch Account",
+        "category": "Claude Switch",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "claudeRoster.add",
+        "title": "Add Account",
+        "category": "Claude Switch",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeRoster.rename",
+        "title": "Rename Account",
+        "category": "Claude Switch",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claudeRoster.remove",
+        "title": "Remove Account",
+        "category": "Claude Switch",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudeRoster.setRenewal",
+        "title": "Set Renewal Date",
+        "category": "Claude Switch",
+        "icon": "$(calendar)"
+      },
+      {
+        "command": "claudeRoster.saveCurrent",
+        "title": "Save Current Login",
+        "category": "Claude Switch",
+        "icon": "$(save)"
+      },
+      {
+        "command": "claudeRoster.recapture",
+        "title": "Re-capture Current Login",
+        "category": "Claude Switch"
+      },
+      {
+        "command": "claudeRoster.restore",
+        "title": "Restore Last Backup",
+        "category": "Claude Switch"
+      },
+      {
+        "command": "claudeRoster.refresh",
+        "title": "Refresh",
+        "category": "Claude Switch",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeRoster.showLog",
+        "title": "Show Log",
+        "category": "Claude Switch"
+      },
+      {
+        "command": "claudeRoster.forgetAll",
+        "title": "Remove All Saved Data",
+        "category": "Claude Switch"
+      },
+      {
+        "command": "claudeRoster.signIn.openPage",
+        "title": "Open Sign-in Page",
+        "category": "Claude Switch"
+      },
+      {
+        "command": "claudeRoster.signIn.copyLink",
+        "title": "Copy Sign-in Link",
+        "category": "Claude Switch"
+      },
+      {
+        "command": "claudeRoster.signIn.pasteCode",
+        "title": "Paste Sign-in Code",
+        "category": "Claude Switch"
+      },
+      {
+        "command": "claudeRoster.signIn.cancel",
+        "title": "Cancel Sign-in",
+        "category": "Claude Switch"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "claudeRoster.signIn.openPage",
+          "when": "claudeRoster.signingIn"
+        },
+        {
+          "command": "claudeRoster.signIn.copyLink",
+          "when": "claudeRoster.signingIn"
+        },
+        {
+          "command": "claudeRoster.signIn.pasteCode",
+          "when": "claudeRoster.signingIn"
+        },
+        {
+          "command": "claudeRoster.signIn.cancel",
+          "when": "claudeRoster.signingIn"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "claudeRoster.add",
+          "when": "view == claudeRoster.accounts",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeRoster.refresh",
+          "when": "view == claudeRoster.accounts",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeRoster.recapture",
+          "when": "view == claudeRoster.accounts",
+          "group": "1_login@1"
+        },
+        {
+          "command": "claudeRoster.restore",
+          "when": "view == claudeRoster.accounts",
+          "group": "1_login@2"
+        },
+        {
+          "command": "claudeRoster.showLog",
+          "when": "view == claudeRoster.accounts",
+          "group": "2_log@1"
+        },
+        {
+          "command": "claudeRoster.forgetAll",
+          "when": "view == claudeRoster.accounts",
+          "group": "3_data@1"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "claudeRoster.switch",
+          "when": "webviewId == 'claudeRoster.accounts' && webviewSection == 'profile'",
+          "group": "1_switch@1"
+        },
+        {
+          "command": "claudeRoster.rename",
+          "when": "webviewId == 'claudeRoster.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
+          "group": "2_edit@1"
+        },
+        {
+          "command": "claudeRoster.remove",
+          "when": "webviewId == 'claudeRoster.accounts' && webviewSection == 'profile'",
+          "group": "2_edit@2"
+        },
+        {
+          "command": "claudeRoster.setRenewal",
+          "when": "webviewId == 'claudeRoster.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
+          "group": "2_edit@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Switch",
+      "properties": {
+        "claudeRoster.claudePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Path to the Claude Code CLI that **Add Account** uses to sign in. Leave empty to use the CLI bundled with the Claude Code extension, or `claude` on PATH. User settings only; workspace settings cannot change it."
+        },
+        "claudeRoster.confirmBeforeSwitch": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Ask for confirmation before switching accounts and reloading the window."
+        },
+        "claudeRoster.autoRefreshSeconds": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "scope": "application",
+          "markdownDescription": "How often, in seconds, the Claude Switch tab and status bar re-read the login and Claude Code's usage numbers while the window is focused. These are local file reads; nothing is sent over the network. `0` turns auto-refresh off; values below 5 count as 5."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "check-types": "tsc --noEmit && tsc -p src/webview",
+    "lint": "eslint src test",
+    "compile-tests": "tsc -p . --outDir out",
+    "test:unit": "npm run compile-tests && mocha",
+    "test:integration": "npm run compile-tests && node esbuild.js && vscode-test",
+    "test": "npm run test:unit && npm run test:integration",
+    "vsix": "vsce package"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.x",
+    "@types/vscode": "~1.100.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.0.0",
+    "mocha": "^11.7.6",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.72.0"
+  }
+}

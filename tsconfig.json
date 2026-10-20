@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "module": "Node16",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "rootDir": ".",
+    "sourceMap": true,
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "types": ["node", "mocha", "vscode"]
+  },
+  "include": ["src", "test"],
+  // The webview runs in a browser and is checked by src/webview/tsconfig.json.
+  "exclude": ["src/webview/main.ts"]
+}
