@@ -1,5 +1,7 @@
 /** Types shared by the extension and the Accounts webview. Types only, no code. */
 
+import type { InputRule } from './rules';
+
 export interface AccountCard {
   id: string;
   alias: string;
@@ -49,6 +51,8 @@ export interface RosterViewState {
   /** Add Account is waiting for the browser sign-in. */
   signIn?: { email?: string; hasLink: boolean };
   hasBackup: boolean;
+  /** A switch is under way; the account list waits. */
+  switching?: boolean;
 }
 
 /** Webview to extension. */
@@ -69,7 +73,55 @@ export type WebviewMessage =
   | { type: 'signInCancel' }
   | { type: 'copyLog' }
   | { type: 'clearLog' }
-  | { type: 'openOutput' };
+  | { type: 'openOutput' }
+  /** The answer to the open dialog: a value for input, an action id otherwise; neither means cancelled. */
+  | { type: 'promptResult'; id: string; value?: string; action?: string; color?: number }
+  /** A notice's button was clicked, or (no action) the notice was dismissed. */
+  | { type: 'noticeAction'; id: string; action?: string };
+
+export interface PromptAction {
+  id: string;
+  label: string;
+  style?: 'primary' | 'secondary' | 'danger';
+}
+
+/** A dialog shown inside the tab, in place of VS Code's input boxes, pickers and modal messages. */
+export type PromptSpec =
+  | {
+      kind: 'input';
+      id: string;
+      title: string;
+      message?: string;
+      value?: string;
+      placeholder?: string;
+      confirmLabel: string;
+      rule: InputRule;
+      /** Aliases already in use, for the alias rule. */
+      taken?: string[];
+      optional?: boolean;
+    }
+  /** Edit an account: its name and avatar colour, with a live preview. */
+  | {
+      kind: 'profile';
+      id: string;
+      title: string;
+      message?: string;
+      value: string;
+      taken?: string[];
+      /** The current colour, 0 to AVATAR_COLOURS - 1. */
+      color: number;
+      confirmLabel: string;
+    }
+  | { kind: 'confirm'; id: string; title: string; message?: string; actions: PromptAction[] }
+  | { kind: 'choice'; id: string; title: string; message?: string; options: { id: string; label: string; description?: string }[] };
+
+/** A message shown at the bottom of the tab, in place of VS Code notifications. */
+export interface Notice {
+  id: string;
+  level: 'info' | 'success' | 'warning' | 'error';
+  text: string;
+  actions?: PromptAction[];
+}
 
 /** One line of the activity log. Never contains secrets. */
 export interface LogEntry {
@@ -85,4 +137,9 @@ export type HostMessage =
   /** The whole log, oldest first. */
   | { type: 'log'; entries: LogEntry[] }
   /** Show the log page, for "Claude Switch: Show Log" and "Show Log" buttons. */
-  | { type: 'openLog' };
+  | { type: 'openLog' }
+  /** The dialog to show, or null for none. */
+  | { type: 'prompt'; prompt: PromptSpec | null }
+  | { type: 'notices'; notices: Notice[] }
+  /** Work in progress, shown as a banner; null when done. */
+  | { type: 'busy'; text: string | null };

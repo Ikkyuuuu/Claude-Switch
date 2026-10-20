@@ -1,4 +1,5 @@
 import { ClaudePaths, readTextIfExists, SavedLogin } from './claudeFiles';
+import { isDateString } from './webview/rules';
 
 /**
  * Plan, usage and renewal details shown next to each account. Everything here
@@ -54,11 +55,22 @@ export function parseUsageCache(config: unknown): (UsageInfo & { accountUuid: st
   const utilization = field(cache, 'utilization');
   const fetchedAt = field(cache, 'fetchedAtMs');
   const accountUuid = field(cache, 'accountUuid');
-  if (typeof fetchedAt !== 'number' || typeof accountUuid !== 'string' || !utilization) {
+  if (typeof fetchedAt !== 'number' || typeof accountUuid !== 'string') {
+    return undefined;
+  }
+  const info = usageFromUtilization(utilization, fetchedAt);
+  return info && { accountUuid, ...info };
+}
+
+/**
+ * Usage from Claude's per-window utilization, the shape both the .claude.json
+ * cache and the CLI's get_usage reply use: { five_hour: { utilization, resets_at }, … }.
+ */
+export function usageFromUtilization(utilization: unknown, fetchedAt: number): UsageInfo | undefined {
+  if (!utilization) {
     return undefined;
   }
   const info = {
-    accountUuid,
     fetchedAt,
     session: usageWindow(field(utilization, 'five_hour')),
     weekly: usageWindow(field(utilization, 'seven_day')),
@@ -127,15 +139,7 @@ export function nextRenewal(
   return undefined;
 }
 
-/** True for a real calendar date written as YYYY-MM-DD. */
-export function isDateString(value: string): boolean {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) {
-    return false;
-  }
-  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  return month >= 1 && month <= 12 && day >= 1 && day <= daysIn(year, month - 1);
-}
+export { isDateString };
 
 function rollForward(anchor: string, months: number, now: number, firstStep: number): string {
   const [year, month, day] = anchor.split('-').map(Number);

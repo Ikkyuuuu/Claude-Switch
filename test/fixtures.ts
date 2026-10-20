@@ -98,6 +98,57 @@ export async function readFiles(paths: ClaudePaths): Promise<{ credentials: stri
   return { credentials, config: await fs.readFile(paths.globalConfigFile, 'utf8') };
 }
 
+/**
+ * Behaves like VS Code's globalState: an update changes the in-memory value at
+ * once, but VS Code later sends the value it stored back, which replaces the
+ * in-memory copy, and only then resolves the update. Tests deliver those
+ * echoes themselves, to put them exactly where a race would.
+ */
+export class EchoingState implements KeyValueStore {
+  private readonly memory = new Map<string, unknown>();
+  private readonly echoes: { key: string; value: unknown; resolve: () => void }[] = [];
+
+  get<T>(key: string): T | undefined {
+    const value = this.memory.get(key);
+    return value === undefined ? undefined : (structuredClone(value) as T);
+  }
+
+  update(key: string, value: unknown): Promise<void> {
+    this.set(key, value);
+    return new Promise((resolve) => this.echoes.push({ key, value: structuredClone(value), resolve }));
+  }
+
+  /** Delivers the oldest pending echo. */
+  deliverOne(): void {
+    const echo = this.echoes.shift();
+    if (echo) {
+      this.set(echo.key, echo.value);
+      echo.resolve();
+    }
+  }
+
+  /** Delivers echoes until no more writes follow. */
+  async settle(): Promise<void> {
+    for (let idle = 0; idle < 3; ) {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (this.echoes.length) {
+        this.deliverOne();
+        idle = 0;
+      } else {
+        idle++;
+      }
+    }
+  }
+
+  private set(key: string, value: unknown): void {
+    if (value === undefined) {
+      this.memory.delete(key);
+    } else {
+      this.memory.set(key, structuredClone(value));
+    }
+  }
+}
+
 export class MemoryState implements KeyValueStore {
   readonly data = new Map<string, unknown>();
   get<T>(key: string): T | undefined {

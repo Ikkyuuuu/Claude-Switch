@@ -1,10 +1,11 @@
 import { nextRenewal, UsageInfo } from './accountDetails';
 import type { ProfileMeta } from './profileStore';
 import type { LiveState } from './switchEngine';
+import { AVATAR_COLOURS, DEFAULT_AVATAR_COLOURS, initialsOf, isAvatarColour } from './webview/avatar';
 import type { AccountCard, RenewalView, RosterViewState, UsageMeter, WebviewMessage } from './webview/protocol';
 
-/** Matches the .avatar-N classes in media/roster.css. */
-export const AVATAR_COLOURS = 8;
+// Also exported from here for existing callers.
+export { AVATAR_COLOURS, initialsOf };
 
 /** An Add Account sign-in in progress. */
 export interface SignInState {
@@ -19,6 +20,7 @@ export interface ViewInput {
   reloadPending?: { alias?: string };
   signIn?: SignInState;
   hasBackup: boolean;
+  switching?: boolean;
   /** For renewal dates; defaults to the current time. */
   now?: number;
 }
@@ -52,6 +54,7 @@ export function buildViewState(input: ViewInput): RosterViewState {
     reloadPending: input.reloadPending,
     signIn: input.signIn && { email: input.signIn.email, hasLink: !!input.signIn.url },
     hasBackup: input.hasBackup,
+    ...(input.switching && { switching: true }),
   };
 }
 
@@ -65,7 +68,7 @@ function accountCard(profile: ProfileMeta, now: number): AccountCard {
     alias: profile.alias,
     email: profile.email,
     initials: initialsOf(profile.alias),
-    avatar: avatarOf(profile.id),
+    avatar: colourOf(profile),
     expired: profile.status === 'needs-relogin',
     lastUsedAt: profile.lastUsedAt,
     plan: profile.plan?.label,
@@ -96,21 +99,18 @@ function renewalOf(profile: ProfileMeta, now: number): RenewalView | undefined {
   return profile.plan && !profile.plan.personal ? { kind: 'organization' } : undefined;
 }
 
-/** "Work" gives "W"; "Acme Team" gives "AT". Works for any script. */
-export function initialsOf(alias: string): string {
-  const words = alias.trim().split(/\s+/).filter(Boolean);
-  const first = (word: string) => Array.from(word)[0] ?? '';
-  const letters = words.length > 1 ? first(words[0]) + first(words[1]) : first(words[0] ?? '');
-  return letters.toLocaleUpperCase() || '?';
-}
-
-/** A stable colour per account, so an avatar keeps its colour across renames. */
+/** A stable default colour per account, so an avatar keeps its colour across renames. */
 export function avatarOf(id: string): number {
   let hash = 0;
   for (const char of id) {
     hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   }
-  return hash % AVATAR_COLOURS;
+  return hash % DEFAULT_AVATAR_COLOURS;
+}
+
+/** The colour the user chose for the account, else its default. */
+export function colourOf(profile: Pick<ProfileMeta, 'id' | 'color'>): number {
+  return isAvatarColour(profile.color) ? profile.color : avatarOf(profile.id);
 }
 
 const SIMPLE_MESSAGES = new Set([
@@ -146,6 +146,18 @@ export function parseMessage(raw: unknown): WebviewMessage | undefined {
   }
   if (type === 'signInCode' && typeof code === 'string' && code.trim() && code.length <= 512) {
     return { type, code };
+  }
+  // Dialog answers and notice clicks: the receiver checks them against what it asked.
+  const { id, value, action, color } = raw as Record<string, unknown>;
+  const isId = (x: unknown): x is string => typeof x === 'string' && /^[\w-]{1,64}$/.test(x);
+  if ((type === 'promptResult' || type === 'noticeAction') && isId(id) && (action === undefined || isId(action))) {
+    if (type === 'noticeAction') {
+      return { type, id, action };
+    }
+    const valueOk = value === undefined || (typeof value === 'string' && value.length <= 512);
+    if (valueOk && (color === undefined || isAvatarColour(color))) {
+      return color === undefined ? { type, id, value, action } : { type, id, value, action, color };
+    }
   }
   return undefined;
 }

@@ -1,4 +1,6 @@
-import type { AccountCard, HostMessage, LogEntry, RosterViewState, UsageMeter, WebviewMessage } from './protocol';
+import type { AccountCard, HostMessage, LogEntry, Notice, PromptSpec, RosterViewState, UsageMeter, WebviewMessage } from './protocol';
+import { AVATAR_COLOURS, initialsOf } from './avatar';
+import { checkInput } from './rules';
 
 /**
  * The Accounts view. Plain DOM, no framework. User data (names, emails) is
@@ -25,6 +27,14 @@ type LogFilter = 'all' | LogEntry['level'];
 let logFilter: LogFilter = 'all';
 /** Entries up to this time have been seen on the log page. */
 let logSeenAt = 0;
+/** The dialog the extension is waiting on, notices at the bottom, and work in progress. */
+let prompt: PromptSpec | null = null;
+let notices: Notice[] = [];
+let busyText: string | null = null;
+/** Text typed into inputs, kept across re-renders by input id. */
+const drafts = new Map<string, string>();
+/** The colour picked in the Edit account dialog, kept across re-renders like drafts. */
+let pickedColour: number | undefined;
 
 function send(message: WebviewMessage): void {
   vscode.postMessage(message);
@@ -44,16 +54,25 @@ function closeLogPage(): void {
 
 // ---------------------------------------------------------------- rendering
 
-function render(): void {
+/** freshPrompt: a new dialog just arrived, so start it empty and focus it. */
+function render(options: { freshPrompt?: boolean } = {}): void {
   if (page === 'accounts' && !state) {
     return;
   }
-  // Re-rendering replaces the DOM; keep a half-typed code and the focus.
-  const input = document.getElementById('code') as HTMLInputElement | null;
-  const typed = input?.value ?? '';
-  const hadFocus = document.activeElement === input;
+  // Re-rendering replaces the DOM; keep whatever was typed, and the focus.
+  const activeId = document.activeElement instanceof HTMLElement ? document.activeElement.id : '';
+  for (const input of app.querySelectorAll<HTMLInputElement>('input[id]')) {
+    drafts.set(input.id, input.value);
+  }
+  if (options.freshPrompt) {
+    drafts.delete('prompt-input');
+    pickedColour = undefined;
+  }
 
-  app.replaceChildren(...(page === 'log' || !state ? logPage() : view(state)));
+  const content = page === 'log' || !state ? logPage() : view(state);
+  // While a dialog is open, the page behind it can't be clicked or tabbed into.
+  const pageNode = h('div', { class: 'page', inert: !!prompt }, ...content, notifications());
+  app.replaceChildren(pageNode, ...(prompt ? [dialog(prompt)] : []));
   if (!rendered) {
     // Only the first render fades in; later updates should not flicker.
     rendered = true;
@@ -61,13 +80,247 @@ function render(): void {
     setTimeout(() => app.classList.remove('intro'), 800);
   }
 
-  const next = document.getElementById('code') as HTMLInputElement | null;
-  if (next) {
-    next.value = typed;
-    if (hadFocus) {
-      next.focus();
+  for (const input of app.querySelectorAll<HTMLInputElement>('input[id]')) {
+    const draft = drafts.get(input.id);
+    if (draft !== undefined) {
+      input.value = draft;
     }
   }
+  if (options.freshPrompt) {
+    focusDialog();
+  } else if (activeId) {
+    document.getElementById(activeId)?.focus();
+  }
+}
+
+// ---------------------------------------------------------------- dialogs and notices
+// Everything the extension asks or tells appears here, not in VS Code pop-ups.
+
+function answer(value?: string, action?: string, color?: number): void {
+  if (prompt) {
+    send(color === undefined ? { type: 'promptResult', id: prompt.id, value, action } : { type: 'promptResult', id: prompt.id, value, color });
+  }
+}
+
+/** Name and avatar colour, with a live preview of the avatar. */
+function profileForm(p: Extract<PromptSpec, { kind: 'profile' }>, cancel: HTMLElement): HTMLElement {
+  const nameInput = (): HTMLInputElement => document.getElementById('prompt-input') as HTMLInputElement;
+  const colour = (): number => pickedColour ?? p.color;
+  const preview = h('span', { class: `avatar xl avatar-${colour()}`, 'aria-hidden': 'true' }, initialsOf(drafts.get('prompt-input') ?? p.value));
+  const error = h('div', { class: 'dialog-error', id: 'prompt-error', 'aria-live': 'polite' });
+
+  const swatches = Array.from({ length: AVATAR_COLOURS }, (_, n) =>
+    h('button', {
+      class: `swatch avatar-${n}`,
+      type: 'button',
+      role: 'radio',
+      'aria-checked': String(n === colour()),
+      'aria-label': `Colour ${n + 1}`,
+      title: `Colour ${n + 1}`,
+      // One tab stop for the group; arrow keys move between colours.
+      tabindex: n === colour() ? '0' : '-1',
+      onclick: () => pick(n),
+      onkeydown: (event: Event) => {
+        const key = (event as KeyboardEvent).key;
+        const step = ({ ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 } as Record<string, number>)[key];
+        if (step) {
+          event.preventDefault();
+          pick((n + step + AVATAR_COLOURS) % AVATAR_COLOURS, true);
+        }
+      },
+    }),
+  );
+  // Updates in place rather than re-rendering, so typing and focus are undisturbed.
+  const pick = (n: number, focus = false): void => {
+    pickedColour = n;
+    preview.className = `avatar xl avatar-${n}`;
+    swatches.forEach((s, i) => {
+      s.setAttribute('aria-checked', String(i === n));
+      s.tabIndex = i === n ? 0 : -1;
+    });
+    if (focus) {
+      swatches[n].focus();
+    }
+  };
+
+  return h(
+    'form',
+    {
+      class: 'dialog-form',
+      onsubmit: (event: Event) => {
+        event.preventDefault();
+        const value = nameInput().value;
+        const problem = checkInput('alias', value, { taken: p.taken });
+        if (problem) {
+          error.textContent = problem;
+          return;
+        }
+        answer(value.trim(), undefined, colour());
+      },
+    },
+    h(
+      'div',
+      { class: 'profile-edit' },
+      preview,
+      h(
+        'div',
+        { class: 'profile-name' },
+        h('label', { class: 'field-label', for: 'prompt-input' }, 'Name'),
+        h('input', {
+          id: 'prompt-input',
+          type: 'text',
+          value: p.value,
+          autocomplete: 'off',
+          spellcheck: 'false',
+          'aria-describedby': 'prompt-error',
+          oninput: () => {
+            error.textContent = '';
+            preview.textContent = initialsOf(nameInput().value);
+          },
+        }),
+      ),
+    ),
+    error,
+    h('div', { class: 'field-label', id: 'colour-label' }, 'Colour'),
+    h('div', { class: 'swatches', role: 'radiogroup', 'aria-labelledby': 'colour-label' }, ...swatches),
+    h('div', { class: 'dialog-actions' }, cancel, h('button', { class: 'btn primary', type: 'submit' }, p.confirmLabel)),
+  );
+}
+
+function dialog(p: PromptSpec): HTMLElement {
+  const cancel = h('button', { class: 'btn secondary', type: 'button', onclick: () => answer() }, 'Cancel');
+  let body: Node[];
+  if (p.kind === 'profile') {
+    body = [profileForm(p, cancel)];
+  } else if (p.kind === 'input') {
+    const error = h('div', { class: 'dialog-error', id: 'prompt-error', 'aria-live': 'polite' });
+    body = [
+      h(
+        'form',
+        {
+          class: 'dialog-form',
+          onsubmit: (event: Event) => {
+            event.preventDefault();
+            const value = (document.getElementById('prompt-input') as HTMLInputElement).value;
+            const problem = checkInput(p.rule, value, { taken: p.taken, optional: p.optional });
+            if (problem) {
+              error.textContent = problem;
+              return;
+            }
+            answer(value);
+          },
+        },
+        h('input', {
+          id: 'prompt-input',
+          type: 'text',
+          value: p.value ?? '',
+          placeholder: p.placeholder ?? '',
+          autocomplete: 'off',
+          spellcheck: 'false',
+          'aria-labelledby': 'dialog-title',
+          'aria-describedby': 'prompt-error',
+          oninput: () => {
+            error.textContent = '';
+          },
+        }),
+        error,
+        h('div', { class: 'dialog-actions' }, cancel, h('button', { class: 'btn primary', type: 'submit' }, p.confirmLabel)),
+      ),
+    ];
+  } else if (p.kind === 'confirm') {
+    body = [
+      h(
+        'div',
+        { class: 'dialog-actions' },
+        cancel,
+        ...p.actions.map((a) =>
+          h('button', { class: `btn ${a.style ?? 'secondary'}`, type: 'button', onclick: () => answer(undefined, a.id) }, a.label),
+        ),
+      ),
+    ];
+  } else {
+    body = [
+      h(
+        'div',
+        { class: 'choice-list' },
+        ...p.options.map((o) =>
+          h(
+            'button',
+            { class: 'choice', type: 'button', onclick: () => answer(undefined, o.id) },
+            h('span', { class: 'choice-label' }, o.label),
+            o.description ? h('span', { class: 'choice-desc' }, o.description) : null,
+          ),
+        ),
+      ),
+      h('div', { class: 'dialog-actions' }, cancel),
+    ];
+  }
+  return h(
+    'div',
+    { class: 'overlay' },
+    h(
+      'div',
+      { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dialog-title' },
+      h('h2', { class: 'dialog-title', id: 'dialog-title' }, p.title),
+      p.message ? h('p', { class: 'dialog-message' }, p.message) : null,
+      ...body,
+    ),
+  );
+}
+
+function focusDialog(): void {
+  const input = document.getElementById('prompt-input') as HTMLInputElement | null;
+  if (input) {
+    input.focus();
+    input.select();
+    return;
+  }
+  (app.querySelector('.dialog .btn.primary, .dialog .btn.danger, .dialog .choice') as HTMLElement | null)?.focus();
+}
+
+const NOTICE_ICONS: Record<Notice['level'], IconName> = { info: 'info', success: 'check', warning: 'warning', error: 'error' };
+
+/**
+ * Notices, newest at the bottom, then work in progress. They float over the
+ * bottom of the tab without moving anything else.
+ */
+function notifications(): HTMLElement | null {
+  if (!notices.length && !busyText) {
+    return null;
+  }
+  return h(
+    'div',
+    { class: 'toasts' },
+    ...notices.map((n) =>
+      h(
+        'div',
+        { class: `toast ${n.level}`, role: n.level === 'error' || n.level === 'warning' ? 'alert' : 'status' },
+        icon(NOTICE_ICONS[n.level]),
+        h(
+          'div',
+          { class: 'toast-body' },
+          h('div', { class: 'toast-text' }, n.text),
+          n.actions?.length
+            ? h(
+                'div',
+                { class: 'toast-actions' },
+                ...n.actions.map((a) =>
+                  h(
+                    'button',
+                    { class: `btn small ${a.style ?? 'ghost'}`, onclick: () => send({ type: 'noticeAction', id: n.id, action: a.id }) },
+                    a.label,
+                  ),
+                ),
+              )
+            : null,
+        ),
+        iconButton('close', 'Dismiss', () => send({ type: 'noticeAction', id: n.id })),
+      ),
+    ),
+    busyText
+      ? h('div', { class: 'toast busy', role: 'status' }, h('span', { class: 'spinner small', 'aria-hidden': 'true' }), h('div', { class: 'toast-body' }, busyText))
+      : null,
+  );
 }
 
 function view(s: RosterViewState): Node[] {
@@ -172,7 +425,7 @@ function currentCard(current: RosterViewState['current']): HTMLElement {
             ),
             a.expired ? h('p', { class: 'hint' }, 'Run /login in Claude Code to sign in again.') : null,
           ),
-          h('div', { class: 'card-actions' }, iconButton('pencil', `Rename ${a.alias}`, () => send({ type: 'rename', profileId: a.id }))),
+          h('div', { class: 'card-actions' }, iconButton('pencil', `Edit ${a.alias}`, () => send({ type: 'rename', profileId: a.id }))),
         ),
         usagePanel(a),
         renewalLine(a),
@@ -209,13 +462,20 @@ function currentCard(current: RosterViewState['current']): HTMLElement {
 }
 
 function accountRow(a: AccountCard): HTMLElement {
-  const switchTo = () => send({ type: 'switch', profileId: a.id });
+  // While a switch runs, the rows wait; the extension ignores extra clicks too.
+  const waiting = !!state?.switching;
+  const switchTo = () => {
+    if (!state?.switching) {
+      send({ type: 'switch', profileId: a.id });
+    }
+  };
   return h(
     'div',
     {
-      class: a.expired ? 'row expired' : 'row',
+      class: ['row', a.expired ? 'expired' : '', waiting ? 'waiting' : ''].filter(Boolean).join(' '),
       role: 'button',
       tabindex: '0',
+      'aria-disabled': waiting ? 'true' : 'false',
       title: [`Switch to ${a.alias}`, usageSummary(a), lastUsed(a)].filter(Boolean).join('\n'),
       'aria-label': `Switch to ${a.alias}, ${a.email}${a.expired ? ', sign-in expired' : ''}`,
       'data-vscode-context': context('profile', a.id),
@@ -246,7 +506,7 @@ function accountRow(a: AccountCard): HTMLElement {
     h(
       'div',
       { class: 'row-end' },
-      iconButton('pencil', `Rename ${a.alias}`, () => send({ type: 'rename', profileId: a.id })),
+      iconButton('pencil', `Edit ${a.alias}`, () => send({ type: 'rename', profileId: a.id })),
       iconButton('trash', `Remove ${a.alias}`, () => send({ type: 'remove', profileId: a.id })),
       h('span', { class: 'go', 'aria-hidden': 'true' }, a.expired ? 'Sign in' : 'Switch', icon('arrow')),
     ),
@@ -567,7 +827,7 @@ function meter(m: UsageMeter): HTMLElement {
     h('span', { class: 'meter-label' }, m.label),
     h('span', { class: 'meter-value' }, reset ? 'Reset' : `${percent}%`),
     h('span', { class: 'meter-bar' }, fill),
-    m.resetsAt && !reset ? h('span', { class: 'meter-reset' }, resetText(m.resetsAt)) : null,
+    m.resetsAt && !reset ? h('span', { class: 'meter-reset', 'data-resets': m.resetsAt }, resetText(m.resetsAt)) : null,
   );
 }
 
@@ -623,7 +883,7 @@ function miniUsage(a: AccountCard): HTMLElement | null {
       h('span', { class: 'mini-label' }, SHORT_LABELS[m.key]),
       h('span', { class: 'mini-bar' }, fill),
       h('span', { class: 'mini-value' }, reset ? 'reset' : `${m.percent}%`),
-      !reset && m.resetsAt ? h('span', { class: 'mini-reset' }, resetText(m.resetsAt, 'resets')) : null,
+      !reset && m.resetsAt ? h('span', { class: 'mini-reset', 'data-resets': m.resetsAt, 'data-prefix': 'resets' }, resetText(m.resetsAt, 'resets')) : null,
     );
   });
   const foot = [
@@ -636,9 +896,9 @@ function miniUsage(a: AccountCard): HTMLElement | null {
   return lines.length ? h('div', { class: 'minis' }, ...lines) : null;
 }
 
-/** Amber from 75%, red from 90%, as a class suffix. */
+/** Yellow from 70%, red from 80%, as a class suffix. */
 function level(percent: number): string {
-  return percent >= 90 ? ' danger' : percent >= 75 ? ' warn' : '';
+  return percent >= 80 ? ' danger' : percent >= 70 ? ' warn' : '';
 }
 
 function usageSummary(a: AccountCard): string {
@@ -659,8 +919,13 @@ const dayTimeFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', hou
 const dateFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 const relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 
+/** "Resets in 23 minutes" within the hour, else the clock time, with the day if it isn't today. */
 function resetText(iso: string, prefix = 'Resets'): string {
   const at = new Date(iso);
+  const minutes = Math.ceil((at.getTime() - Date.now()) / 60_000);
+  if (minutes > 0 && minutes < 60) {
+    return `${prefix} ${relativeFormat.format(minutes, 'minute')}`;
+  }
   return `${prefix} ${at.toDateString() === new Date().toDateString() ? timeFormat.format(at) : dayTimeFormat.format(at)}`;
 }
 
@@ -721,7 +986,7 @@ function iconButton(name: IconName, label: string, action: () => void, disabled 
   );
 }
 
-/** Lets VS Code show Rename/Remove when a card is right-clicked. */
+/** Lets VS Code show Edit and Remove when a card is right-clicked. */
 function context(section: string, profileId: string): string {
   return JSON.stringify({ webviewSection: section, profileId, preventDefaultContextMenuItems: true });
 }
@@ -730,9 +995,10 @@ function lastUsed(a: AccountCard): string {
   if (!a.lastUsedAt) {
     return '';
   }
-  const days = Math.round((Date.parse(a.lastUsedAt) - Date.now()) / 86_400_000);
-  const format = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
-  return `Last used ${days === 0 ? 'today' : format.format(days, 'day')}`;
+  // Calendar days, so this morning is "today" and last night is "yesterday".
+  const startOfDay = (time: Date) => new Date(time.getFullYear(), time.getMonth(), time.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date(a.lastUsedAt)) - startOfDay(new Date())) / 86_400_000);
+  return `Last used ${days === 0 ? 'today' : relativeFormat.format(days, 'day')}`;
 }
 
 type Child = Node | string | null | undefined | false;
@@ -777,6 +1043,7 @@ const ICONS = {
   list: '<path d="M6 4.5h7.5M6 8h7.5M6 11.5h7.5"/><path d="M2.75 4.5h.01M2.75 8h.01M2.75 11.5h.01" stroke-width="2"/>',
   info: '<circle cx="8" cy="8" r="5.5"/><path d="M8 7.3v3.7M8 5.2v.1"/>',
   error: '<circle cx="8" cy="8" r="5.5"/><path d="M6 6l4 4M10 6l-4 4"/>',
+  close: '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>',
 } as const;
 type IconName = keyof typeof ICONS;
 
@@ -813,6 +1080,27 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
     case 'openLog':
       openLogPage();
       break;
+    case 'prompt': {
+      const fresh = !!message.prompt && message.prompt.id !== prompt?.id;
+      prompt = message.prompt;
+      render({ freshPrompt: fresh });
+      break;
+    }
+    case 'notices':
+      notices = Array.isArray(message.notices) ? message.notices : [];
+      render();
+      break;
+    case 'busy':
+      busyText = message.text;
+      render();
+      break;
+  }
+});
+// Escape cancels the open dialog, wherever the focus is.
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && prompt) {
+    event.preventDefault();
+    answer();
   }
 });
 // A restored webview shows its last state at once; the extension then sends a fresh one.
@@ -827,3 +1115,10 @@ setInterval(() => {
     render();
   }
 }, 60_000);
+
+// "Resets in 23 minutes" counts down in place, even while focus is in the tab.
+setInterval(() => {
+  for (const span of app.querySelectorAll<HTMLElement>('[data-resets]')) {
+    span.textContent = resetText(span.dataset.resets ?? '', span.dataset.prefix);
+  }
+}, 15_000);

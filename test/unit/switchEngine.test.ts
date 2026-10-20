@@ -1,4 +1,5 @@
 import * as assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { ClaudePaths, readSnapshot, SavedLogin } from '../../src/claudeFiles';
@@ -38,6 +39,7 @@ suite('SwitchEngine', () => {
     now = Date.now();
     engine = new SwitchEngine(paths, store, silentLogger, {
       lockFile: path.join(home, 'storage', 'switch.lock'),
+      lockWaitMs: 600,
       settleMs: 1,
       now: () => now,
       onStep: async (step) => {
@@ -90,11 +92,26 @@ suite('SwitchEngine', () => {
     assert.equal((await readSnapshot(paths)).credentialsRaw, refreshed.credentialsRaw);
   });
 
-  test('keeps a saved login that is newer than the live one', async () => {
+  test('keeps a saved login that is newer than the live one, and says so once', async () => {
+    const messages: string[] = [];
+    const lockFile = path.join(home, 'storage', 'switch.lock');
+    engine = new SwitchEngine(paths, store, { ...silentLogger, info: (m) => messages.push(m) }, { lockFile, settleMs: 1, now: () => now });
+    // Add Account for the account Claude is already signed in to: a fresh login, newer than the live one.
     const newer = fakeLogin('A', { version: 5 });
     await store.updateLogin(work.id, newer);
-    await engine.refresh();
+
+    // Auto-refresh runs every few seconds.
+    for (let i = 0; i < 3; i++) {
+      await engine.refresh();
+    }
     assert.equal((await store.getLogin(work.id))?.credentialsRaw, newer.credentialsRaw);
+    assert.equal(messages.filter((m) => m.startsWith('Kept the saved login')).length, 1, messages.join('\n'));
+
+    // Once Claude refreshes the live login past the saved one, it is saved as usual.
+    const refreshed = fakeLogin('A', { version: 9 });
+    await writeLive(paths, refreshed);
+    await engine.refresh();
+    assert.equal((await store.getLogin(work.id))?.credentialsRaw, refreshed.credentialsRaw);
   });
 
   test('does nothing when the profile is already active', async () => {
@@ -256,6 +273,51 @@ suite('SwitchEngine', () => {
     assert.equal(check.outcome, 'mismatch');
   });
 
+  test('keeps an instant switch when an open conversation rewrites oauthAccount', async () => {
+    await engine.switchTo(personal.id);
+    assert.equal(await engine.keepSwitch(personal.id), 'ok');
+
+    await writeLive(paths, { credentialsRaw: loginB.credentialsRaw, account: loginA.account });
+    assert.equal(await engine.keepSwitch(personal.id), 'repaired');
+    assert.deepEqual((await readSnapshot(paths)).account, loginB.account);
+
+    // The old tokens came back too: only the user can fix that, by closing the old conversation.
+    await writeLive(paths, loginA);
+    assert.equal(await engine.keepSwitch(personal.id), 'mismatch');
+    assert.equal((await readSnapshot(paths)).credentialsRaw, loginA.credentialsRaw, 'leaves the files alone');
+  });
+
+  test("keeps Claude's current usage with the live account", async () => {
+    const utilization = { five_hour: { utilization: 88, resets_at: new Date(now + 3_600_000).toISOString() }, seven_day: { utilization: 32 } };
+    assert.equal(await engine.checkUsage(async () => utilization), true);
+    assert.equal(store.get(work.id)?.usage?.session?.percent, 88);
+    assert.equal(store.get(work.id)?.usage?.weekly?.percent, 32);
+    assert.equal(store.get(personal.id)?.usage, undefined);
+  });
+
+  test('drops usage when the login changed while Claude was asked', async () => {
+    const utilization = { five_hour: { utilization: 50 } };
+    const changed = await engine.checkUsage(async () => {
+      await writeLive(paths, loginB);
+      return utilization;
+    });
+    assert.equal(changed, false);
+    assert.equal(store.get(work.id)?.usage, undefined);
+    assert.equal(store.get(personal.id)?.usage, undefined);
+  });
+
+  test('a usage check holds the switch lock, and a switch waits for it', async () => {
+    let finishCheck: () => void = () => undefined;
+    const check = engine.checkUsage(() => new Promise((resolve) => (finishCheck = () => resolve({ five_hour: { utilization: 1 } }))));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Another background check skips its turn rather than queueing.
+    await assert.rejects(engine.checkUsage(async () => ({})), LockBusyError);
+    const switching = engine.switchTo(personal.id);
+    setTimeout(() => finishCheck(), 200);
+    assert.equal(await check, true);
+    assert.equal((await switching).outcome, 'switched');
+  });
+
   test('only one switch runs at a time', async () => {
     const release = await acquireLock(path.join(home, 'storage', 'switch.lock'));
     await assert.rejects(engine.switchTo(personal.id), LockBusyError);
@@ -270,5 +332,22 @@ suite('SwitchEngine', () => {
     await fs.utimes(lockFile, old, old);
     await engine.switchTo(personal.id);
     await assert.rejects(fs.access(lockFile), 'lock released after the switch');
+  });
+
+  test('takes over a fresh lock at once when the window that held it is gone', async () => {
+    // A process that has already exited stands in for a window that reloaded mid-switch.
+    const gone = spawn(process.execPath, ['-e', '']);
+    await new Promise((resolve) => gone.once('exit', resolve));
+    const lockFile = path.join(home, 'storage', 'switch.lock');
+    await fs.writeFile(lockFile, `${gone.pid} ${new Date().toISOString()}`);
+    const started = Date.now();
+    await engine.switchTo(personal.id);
+    assert.ok(Date.now() - started < 500, 'did not wait for the lock');
+  });
+
+  test('waits for a lock held by a running window', async () => {
+    const lockFile = path.join(home, 'storage', 'switch.lock');
+    await fs.writeFile(lockFile, `${process.ppid} ${new Date().toISOString()}`);
+    await assert.rejects(engine.switchTo(personal.id), LockBusyError);
   });
 });

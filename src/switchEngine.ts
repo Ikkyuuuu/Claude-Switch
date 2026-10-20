@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { planOf, readUsageCache } from './accountDetails';
+import { planOf, readUsageCache, usageFromUtilization } from './accountDetails';
 import {
   accessTokenExpiry,
   assertGlobalConfigWritable,
@@ -11,6 +12,7 @@ import {
   identityOf,
   LoginSnapshot,
   readSnapshot,
+  readTextIfExists,
   refreshTokenExpiry,
   sameAccount,
   sameSnapshot,
@@ -32,6 +34,11 @@ export interface EngineOptions {
   /** Test hook called before each step; throwing simulates a failure at that step. */
   onStep?: (step: Step) => void | Promise<void>;
   now?: () => number;
+  /**
+   * How long a switch waits for another window's switch, or a usage check, to
+   * finish before giving up. Defaults to LOCK_WAIT_MS.
+   */
+  lockWaitMs?: number;
 }
 
 export type LiveState =
@@ -69,10 +76,18 @@ export class LockBusyError extends Error {
 }
 
 const LOCK_STALE_MS = 2 * 60_000;
+const LOCK_WAIT_MS = 20_000;
+const LOCK_RETRY_MS = 150;
 const LAST_SWITCH_WINDOW_MS = 10 * 60_000;
 const STABLE_READ_ATTEMPTS = 4;
 
 export class SwitchEngine {
+  /**
+   * A hash of the live login that syncBack last declined because the saved one
+   * is newer. Until the live login changes, refresh() has nothing to do.
+   */
+  private declinedLive: string | undefined;
+
   constructor(
     private readonly paths: ClaudePaths,
     private readonly store: ProfileStore,
@@ -93,9 +108,9 @@ export class SwitchEngine {
   async refresh(): Promise<LiveState> {
     const live = await this.detect();
     // Usually nothing changed; then skip the lock, since auto-refresh runs every few seconds.
-    if (live.kind === 'known' && (await this.differsFromSaved(live))) {
+    if (live.kind === 'known' && hashOf(live.login.credentialsRaw) !== this.declinedLive && (await this.differsFromSaved(live))) {
       try {
-        await this.withLock(() => this.syncBack(live));
+        await this.withLock(() => this.syncBack(live), 0);
       } catch (err) {
         if (!(err instanceof LockBusyError)) {
           this.log.warn(`Could not save the refreshed login: ${errorMessage(err)}`);
@@ -236,18 +251,74 @@ export class SwitchEngine {
       return { outcome: 'none' };
     }
     return this.withLock(async () => {
-      const live = await this.readStable();
-      if (sameAccount(live.account, target.account)) {
-        return { outcome: 'ok' };
-      }
-      if (live.credentialsRaw === target.credentialsRaw) {
-        await this.applyVerified(target, live);
+      const outcome = await this.checkLive(target);
+      if (outcome === 'repaired') {
         this.log.warn(`Repaired oauthAccount for "${profile.alias}" after it was overwritten during reload.`);
-        return { outcome: 'repaired' };
+      } else if (outcome === 'mismatch') {
+        this.log.warn(`The switch to "${profile.alias}" did not stick; another process changed the login.`);
+        return { outcome, profile };
       }
-      this.log.warn(`The switch to "${profile.alias}" did not stick; another process changed the login.`);
-      return { outcome: 'mismatch', profile };
+      return { outcome };
     });
+  }
+
+  /**
+   * After a switch without a reload, Claude conversations that were already
+   * open keep running, and can write their in-memory .claude.json, with the
+   * old oauthAccount, next to the new tokens. Puts the profile's back.
+   */
+  async keepSwitch(profileId: string): Promise<'ok' | 'repaired' | 'mismatch' | 'none'> {
+    const profile = this.store.get(profileId);
+    const target = profile && (await this.store.getLogin(profile.id));
+    if (!profile || !target) {
+      return 'none';
+    }
+    return this.withLock(async () => {
+      const outcome = await this.checkLive(target);
+      if (outcome === 'repaired') {
+        this.log.warn(`Put back oauthAccount for "${profile.alias}": a Claude conversation opened before the switch had rewritten it.`);
+      }
+      return outcome;
+    });
+  }
+
+  /**
+   * Gets the live account's current usage from Claude (see usageCheck.ts) and
+   * keeps it with that account. Holds the switch lock while Claude runs, so no
+   * switch in any window changes the login meanwhile; a switch waits for it.
+   * Returns false when there was nothing to check, or the login changed anyway.
+   */
+  async checkUsage(ask: () => Promise<unknown>): Promise<boolean> {
+    return this.withLock(async () => {
+      const live = this.classify(await this.readStable());
+      if (live.kind !== 'known') {
+        return false;
+      }
+      const usage = usageFromUtilization(await ask(), this.now());
+      // Claude Code's /login could still have changed the account.
+      const after = await readSnapshot(this.paths);
+      const profile = this.store.get(live.profile.id);
+      if (!usage || !profile || !sameAccount(after.account, live.login.account)) {
+        return false;
+      }
+      if (usage.fetchedAt > (profile.usage?.fetchedAt ?? 0)) {
+        await this.store.setDetails(profile.id, { usage });
+      }
+      return true;
+    }, 0);
+  }
+
+  /** Whether the live login is still `target`'s; repairs it when only oauthAccount changed. Call under the lock. */
+  private async checkLive(target: SavedLogin): Promise<'ok' | 'repaired' | 'mismatch'> {
+    const live = await this.readStable();
+    if (sameAccount(live.account, target.account)) {
+      return 'ok';
+    }
+    if (live.credentialsRaw === target.credentialsRaw) {
+      await this.applyVerified(target, live);
+      return 'repaired';
+    }
+    return 'mismatch';
   }
 
   /**
@@ -357,7 +428,12 @@ export class SwitchEngine {
     const savedExpiry = saved ? accessTokenExpiry(saved.credentialsRaw) : undefined;
     const liveExpiry = accessTokenExpiry(login.credentialsRaw);
     if (savedExpiry !== undefined && liveExpiry !== undefined && liveExpiry < savedExpiry) {
-      this.log.info(`Kept the saved login for "${profile.alias}" because it is newer than the live one.`);
+      // Both still work; say so once, not on every auto-refresh.
+      const declined = hashOf(login.credentialsRaw);
+      if (strict || declined !== this.declinedLive) {
+        this.log.info(`Kept the saved login for "${profile.alias}" because it is newer than the live one.`);
+      }
+      this.declinedLive = declined;
       return;
     }
     await this.store.updateLogin(profile.id, login);
@@ -413,8 +489,9 @@ export class SwitchEngine {
     throw new Error("Claude's login files keep changing, perhaps because a sign-in is in progress. Try again in a moment.");
   }
 
-  private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const release = await acquireLock(this.options.lockFile);
+  /** Background work passes waitMs 0, so it skips its turn rather than queueing. */
+  private async withLock<T>(fn: () => Promise<T>, waitMs = this.options.lockWaitMs ?? LOCK_WAIT_MS): Promise<T> {
+    const release = await acquireLock(this.options.lockFile, LOCK_STALE_MS, waitMs);
     try {
       return await fn();
     } finally {
@@ -434,8 +511,25 @@ export class SwitchEngine {
 const MISMATCH_MESSAGE =
   "Claude's tokens and account info don't match, which usually means another VS Code window or a running claude session wrote back an old login. Reload the other windows, then sign in again if needed.";
 
-/** Creates the lock file exclusively; a lock older than LOCK_STALE_MS is treated as abandoned. */
-export async function acquireLock(file: string, staleMs = LOCK_STALE_MS): Promise<() => Promise<void>> {
+/**
+ * Creates the lock file exclusively, waiting up to waitMs while another holds
+ * it; a lock older than LOCK_STALE_MS is treated as abandoned.
+ */
+export async function acquireLock(file: string, staleMs = LOCK_STALE_MS, waitMs = 0): Promise<() => Promise<void>> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      return await tryLock(file, staleMs);
+    } catch (err) {
+      if (!(err instanceof LockBusyError) || Date.now() >= deadline) {
+        throw err;
+      }
+      await delay(LOCK_RETRY_MS);
+    }
+  }
+}
+
+async function tryLock(file: string, staleMs: number): Promise<() => Promise<void>> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -450,11 +544,29 @@ export async function acquireLock(file: string, staleMs = LOCK_STALE_MS): Promis
         throw err;
       }
       const stat = await fs.stat(file).catch(() => undefined);
-      if (stat && Date.now() - stat.mtimeMs < staleMs) {
+      // A window that reloaded or crashed while holding the lock leaves it behind; its process is gone.
+      const holder = Number.parseInt((await readTextIfExists(file).catch(() => undefined)) ?? '', 10);
+      const holderGone = Number.isInteger(holder) && holder !== process.pid && !isRunning(holder);
+      if (stat && Date.now() - stat.mtimeMs < staleMs && !holderGone) {
         throw new LockBusyError();
       }
       await fs.rm(file, { force: true });
     }
   }
   throw new LockBusyError();
+}
+
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it exists, but belongs to someone else.
+    return errorCode(err) === 'EPERM';
+  }
+}
+
+/** For remembering a login without keeping its tokens around. */
+function hashOf(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
 }

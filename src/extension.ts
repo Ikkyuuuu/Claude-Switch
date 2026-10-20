@@ -39,7 +39,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Roster
     context.subscriptions.push(view, vscode.window.registerWebviewViewProvider(AccountsView.id, view));
     for (const id of COMMAND_IDS) {
       context.subscriptions.push(
-        vscode.commands.registerCommand(id, () => vscode.window.showWarningMessage(MAC_MESSAGE)),
+        // The tab itself explains that macOS is not supported.
+        vscode.commands.registerCommand(id, () => view.reveal()),
       );
     }
     return undefined;
@@ -55,7 +56,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Roster
     void controller.onRemoteSwitch(signal);
   });
   const testMode = context.extensionMode === vscode.ExtensionMode.Test;
-  const controller = new RosterController(engine, store, statusBar, view, log, sync, testMode);
+  const controller = new RosterController(engine, store, statusBar, view, log, sync, testMode, storageDir);
   context.subscriptions.push(statusBar, view, controller, { dispose: () => sync.dispose() });
 
   /** Clicks in the Accounts view. Messages are already validated by AccountsView. */
@@ -64,7 +65,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Roster
       case 'switch':
         return controller.switchAccount({ profileId: message.profileId });
       case 'rename':
-        return controller.renameAccount(message.profileId);
+        return controller.editAccount(message.profileId);
       case 'remove':
         return controller.removeAccount(message.profileId);
       case 'setRenewal':
@@ -80,7 +81,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Roster
       case 'copyLog':
         return vscode.env.clipboard
           .writeText(log.toText())
-          .then(() => vscode.window.showInformationMessage('Copied the Claude Switch log. It contains no secrets.'));
+          .then(() => view.notify('success', 'Copied the log. It contains no secrets.'));
       case 'clearLog':
         return log.clear();
       case 'openOutput':
@@ -96,15 +97,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<Roster
       case 'signInCancel':
         return controller.signInCancel();
       case 'ready':
+      case 'promptResult':
+      case 'noticeAction':
+        // Handled by AccountsView itself.
         return undefined;
     }
   };
 
-  // Right-clicking an account in the view passes { profileId } to Rename and Remove.
+  // Right-clicking an account in the view passes { profileId } to Edit and Remove.
   const handlers: Record<(typeof COMMAND_IDS)[number], (...args: unknown[]) => unknown> = {
     'claudeRoster.switch': (args) => controller.switchAccount(isSwitchArgs(args) ? args : undefined),
     'claudeRoster.add': () => controller.addAccount(),
-    'claudeRoster.rename': (row) => controller.renameAccount(profileIdOf(row)),
+    'claudeRoster.rename': (row) => controller.editAccount(profileIdOf(row)),
     'claudeRoster.remove': (row) => controller.removeAccount(profileIdOf(row)),
     'claudeRoster.setRenewal': (row) => controller.setRenewal(profileIdOf(row)),
     'claudeRoster.saveCurrent': () => controller.saveCurrent(),
@@ -126,10 +130,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<Roster
     vscode.window.onDidChangeWindowState((state) => {
       if (state.focused) {
         controller.refreshIfStale();
+        controller.checkUsageIfDue();
       }
     }),
     // Another window may have added or removed accounts since this list was drawn.
-    view.onDidBecomeVisible(() => controller.refreshIfStale()),
+    view.onDidBecomeVisible(() => {
+      controller.refreshIfStale();
+      controller.checkUsageIfDue();
+    }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('claudeRoster.autoRefreshSeconds')) {
         controller.startAutoRefresh();
@@ -138,7 +146,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Roster
   );
 
   log.info(`Claude login files: ${paths.credentialsFile} and ${paths.globalConfigFile}`);
-  warnAboutConfigDir(context, paths, log);
+  warnAboutConfigDir(context, paths, log, view);
   await sync.start();
   const ready = controller.startup();
 
@@ -178,7 +186,7 @@ function profileIdOf(value: unknown): string | undefined {
 }
 
 /** Warns once per folder: Claude Switch follows CLAUDE_CONFIG_DIR, but the Claude extension may not. */
-function warnAboutConfigDir(context: vscode.ExtensionContext, paths: ClaudePaths, log: RosterLog): void {
+function warnAboutConfigDir(context: vscode.ExtensionContext, paths: ClaudePaths, log: RosterLog, view: AccountsView): void {
   if (!paths.fromEnv || context.extensionMode === vscode.ExtensionMode.Test) {
     return;
   }
@@ -186,6 +194,6 @@ function warnAboutConfigDir(context: vscode.ExtensionContext, paths: ClaudePaths
   log.warn(message);
   if (context.globalState.get<string>(WARNED_CONFIG_DIR_KEY) !== paths.configDir) {
     void context.globalState.update(WARNED_CONFIG_DIR_KEY, paths.configDir);
-    void vscode.window.showWarningMessage(message);
+    void view.notify('warning', message);
   }
 }

@@ -2,7 +2,7 @@
   "name": "claude-switch-accounts",
   "displayName": "Claude Switch (unofficial)",
   "description": "Switch which Claude account the Claude Code extension and CLI use. Not affiliated with Anthropic.",
-  "version": "0.8.3",
+  "version": "0.10.1",
   "publisher": "wattanun42",
   "license": "MIT",
   "repository": {
@@ -70,7 +70,7 @@
       },
       {
         "command": "claudeRoster.rename",
-        "title": "Rename Account",
+        "title": "Edit Account",
         "category": "Claude Switch",
         "icon": "$(edit)"
       },
@@ -226,7 +226,32 @@
           "type": "boolean",
           "default": true,
           "scope": "application",
-          "description": "Ask for confirmation before switching accounts and reloading the window."
+          "markdownDescription": "Ask for confirmation before switching accounts when `#claudeRoster.switchMode#` restarts extensions or reloads the window. Instant switches never ask."
+        },
+        "claudeRoster.switchMode": {
+          "type": "string",
+          "default": "reloadWindow",
+          "enum": [
+            "reloadWindow",
+            "restartExtensions",
+            "newConversation",
+            "instant"
+          ],
+          "enumDescriptions": [
+            "Close and reopen the window after switching, so every Claude Code conversation in it restarts on the new account. The most reliable.",
+            "Restart VS Code extensions (a few seconds; editors and terminals stay open), so every Claude Code conversation in this window uses the new account.",
+            "Switch without restarting and open a new Claude Code conversation on the new account. Conversations that were already open keep the old account and can write it back.",
+            "Switch without restarting. New Claude Code conversations use the new account; open ones keep the old account and can write it back."
+          ],
+          "scope": "application",
+          "markdownDescription": "What happens after switching accounts. By default the window reloads, so no Claude Code conversation is left running on the old account. The instant modes are faster, but conversations that were already open keep the old account until you start a new one."
+        },
+        "claudeRoster.usageCheckSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 0,
+          "scope": "application",
+          "markdownDescription": "How often, in seconds, Claude Switch asks Claude Code for the active account's current usage while the Claude Switch tab is open and the window is focused. Claude Code's own CLI fetches the numbers, the way its Account & Usage panel does; Claude Switch never handles your token or makes the request itself. Without this, the tab shows the numbers Claude Code last saved, which can be several minutes old. `0` turns it off; values below 60 count as 60, because Claude reuses numbers younger than a minute."
         },
         "claudeRoster.autoRefreshSeconds": {
           "type": "number",

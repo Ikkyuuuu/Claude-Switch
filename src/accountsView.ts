@@ -4,9 +4,33 @@ import { ProfileStore } from './profileStore';
 import { RosterLog } from './rosterLog';
 import { LiveState } from './switchEngine';
 import { buildViewState, parseMessage, SignInState, unsupportedState } from './viewModel';
-import type { HostMessage, RosterViewState, WebviewMessage } from './webview/protocol';
+import type { HostMessage, Notice, PromptAction, PromptSpec, RosterViewState, WebviewMessage } from './webview/protocol';
+import { isAvatarColour } from './webview/avatar';
+import { checkInput } from './webview/rules';
 
 export type { SignInState };
+
+type Without<T, K extends keyof T> = Omit<T, K>;
+export type InputOptions = Without<Extract<PromptSpec, { kind: 'input' }>, 'kind' | 'id'>;
+export type ConfirmOptions = Without<Extract<PromptSpec, { kind: 'confirm' }>, 'kind' | 'id'>;
+export type ChoiceOptions = Without<Extract<PromptSpec, { kind: 'choice' }>, 'kind' | 'id'>;
+export type ProfileOptions = Without<Extract<PromptSpec, { kind: 'profile' }>, 'kind' | 'id'>;
+
+interface Answer {
+  value?: string;
+  action?: string;
+  color?: number;
+}
+
+interface PendingPrompt {
+  spec: PromptSpec;
+  resolve: (answer: Answer | undefined) => void;
+}
+
+/** How long success and info notices stay; warnings and errors stay until dismissed. */
+const NOTICE_MS = 6_000;
+const NOTICE_WITH_ACTIONS_MS = 15_000;
+const MAX_NOTICES = 4;
 
 /**
  * The Accounts view in the Claude Switch activity bar tab: a webview drawn by
@@ -28,6 +52,13 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
   private logRequested = false;
   private logTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly stopWatchingLog: () => void;
+  /** Dialogs waiting for an answer; the first one is on screen. */
+  private readonly prompts: PendingPrompt[] = [];
+  private notices: Notice[] = [];
+  private readonly noticeResolvers = new Map<string, (action?: string) => void>();
+  /** Tasks showing a progress banner; the latest one's text shows. */
+  private busyTasks: { text: string }[] = [];
+  private nextId = 0;
 
   /** Fires whenever the view becomes visible, so a stale list can be refreshed. */
   readonly onDidBecomeVisible = this.shown.event;
@@ -63,6 +94,159 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
     return this.current;
   }
 
+  /** The dialog on screen, if any. */
+  get currentPrompt(): PromptSpec | undefined {
+    return this.prompts[0]?.spec;
+  }
+
+  /** Whether the tab is open and showing. */
+  get visible(): boolean {
+    return !!this.view?.visible;
+  }
+
+  get currentNotices(): Notice[] {
+    return [...this.notices];
+  }
+
+  /** Opens the Claude Switch tab. */
+  reveal(): void {
+    void vscode.commands.executeCommand(`${AccountsView.id}.focus`);
+  }
+
+  // ------------------------------------------------------------ in-tab UI
+  // Everything the user is asked or told appears inside the tab, in place of
+  // VS Code's input boxes, pickers, modal dialogs and notifications.
+
+  /** Asks for text. Resolves to the trimmed answer ('' when optional and left empty), or undefined if cancelled. */
+  async input(options: InputOptions): Promise<string | undefined> {
+    return (await this.ask({ kind: 'input', id: this.newId(), ...options }))?.value;
+  }
+
+  /** Asks the user to pick one of the actions. Resolves to its id, or undefined if cancelled. */
+  async confirm(options: ConfirmOptions): Promise<string | undefined> {
+    return (await this.ask({ kind: 'confirm', id: this.newId(), ...options }))?.action;
+  }
+
+  /** Asks the user to pick from a list. Resolves to the option's id, or undefined if cancelled. */
+  async choose(options: ChoiceOptions): Promise<string | undefined> {
+    return (await this.ask({ kind: 'choice', id: this.newId(), ...options }))?.action;
+  }
+
+  /** Asks for an account's name and avatar colour. Resolves to both, or undefined if cancelled. */
+  async editProfile(options: ProfileOptions): Promise<{ alias: string; color: number } | undefined> {
+    const answer = await this.ask({ kind: 'profile', id: this.newId(), ...options });
+    return answer?.value !== undefined && answer.color !== undefined ? { alias: answer.value, color: answer.color } : undefined;
+  }
+
+  /**
+   * Shows a notice at the bottom of the tab. Resolves to the id of the button the
+   * user clicked, or undefined when it is dismissed or times out.
+   */
+  notify(level: Notice['level'], text: string, actions: PromptAction[] = []): Promise<string | undefined> {
+    const notice: Notice = { id: this.newId(), level, text, actions };
+    // The same message again, say from repeated clicks, replaces the one showing rather than stacking.
+    for (const same of this.notices.filter((n) => n.level === level && n.text === text)) {
+      this.closeNotice(same.id);
+    }
+    for (const dropped of this.notices.slice(0, Math.max(0, this.notices.length + 1 - MAX_NOTICES))) {
+      this.closeNotice(dropped.id);
+    }
+    this.notices = [...this.notices, notice];
+    this.sendNotices();
+    if (level === 'warning' || level === 'error') {
+      this.reveal();
+    }
+    return new Promise((resolve) => {
+      this.noticeResolvers.set(notice.id, resolve);
+      if (level === 'info' || level === 'success') {
+        setTimeout(() => this.closeNotice(notice.id), actions.length ? NOTICE_WITH_ACTIONS_MS : NOTICE_MS);
+      }
+    });
+  }
+
+  /** Shows a banner while the task runs. Tasks can overlap; each one's banner stays until it ends. */
+  async busy<T>(text: string, task: () => Promise<T>): Promise<T> {
+    const entry = { text };
+    this.busyTasks.push(entry);
+    this.sendBusy();
+    try {
+      return await task();
+    } finally {
+      this.busyTasks = this.busyTasks.filter((t) => t !== entry);
+      this.sendBusy();
+    }
+  }
+
+  private sendBusy(): void {
+    this.send({ type: 'busy', text: this.busyTasks[this.busyTasks.length - 1]?.text ?? null });
+  }
+
+  private ask(spec: PromptSpec): Promise<Answer | undefined> {
+    return new Promise((resolve) => {
+      this.prompts.push({ spec, resolve });
+      if (this.prompts.length === 1) {
+        this.sendPrompt();
+      }
+      this.reveal();
+    });
+  }
+
+  /** Accepts an answer only for the dialog on screen, and re-checks it: webview input is untrusted. */
+  private answer(id: string, value: string | undefined, action: string | undefined, color: number | undefined): void {
+    const head = this.prompts[0];
+    if (!head || head.spec.id !== id) {
+      return;
+    }
+    let result: Answer | undefined;
+    if (value !== undefined || action !== undefined) {
+      const spec = head.spec;
+      if (spec.kind === 'input') {
+        if (value === undefined || checkInput(spec.rule, value, { taken: spec.taken, optional: spec.optional })) {
+          return;
+        }
+        result = { value: value.trim() };
+      } else if (spec.kind === 'profile') {
+        if (value === undefined || checkInput('alias', value, { taken: spec.taken }) || !isAvatarColour(color)) {
+          return;
+        }
+        result = { value: value.trim(), color };
+      } else {
+        const allowed = spec.kind === 'confirm' ? spec.actions.map((a) => a.id) : spec.options.map((o) => o.id);
+        if (!action || !allowed.includes(action)) {
+          return;
+        }
+        result = { action };
+      }
+    }
+    this.prompts.shift();
+    this.sendPrompt();
+    head.resolve(result);
+  }
+
+  private closeNotice(id: string, action?: string): void {
+    const notice = this.notices.find((n) => n.id === id);
+    if (!notice) {
+      return;
+    }
+    this.notices = this.notices.filter((n) => n.id !== id);
+    this.sendNotices();
+    const resolve = this.noticeResolvers.get(id);
+    this.noticeResolvers.delete(id);
+    resolve?.(action && notice.actions?.some((a) => a.id === action) ? action : undefined);
+  }
+
+  private sendPrompt(): void {
+    this.send({ type: 'prompt', prompt: this.prompts[0]?.spec ?? null });
+  }
+
+  private sendNotices(): void {
+    this.send({ type: 'notices', notices: this.notices });
+  }
+
+  private newId(): string {
+    return `p${++this.nextId}`;
+  }
+
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     this.ready = false;
@@ -77,6 +261,7 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
       view.webview.onDidReceiveMessage((raw) => this.receive(raw)),
       view.onDidChangeVisibility(() => {
         if (view.visible) {
+          this.flushLogRequest();
           this.shown.fire();
         }
       }),
@@ -93,18 +278,30 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
     if (!message) {
       return;
     }
-    if (message.type === 'ready') {
-      this.ready = true;
-      this.post(true);
-      this.postLog();
-      this.flushLogRequest();
-      this.shown.fire();
-      return;
+    switch (message.type) {
+      case 'ready':
+        // A (re)loaded webview starts empty: send everything it should show.
+        this.ready = true;
+        this.post(true);
+        this.postLog();
+        this.sendPrompt();
+        this.sendNotices();
+        this.sendBusy();
+        this.flushLogRequest();
+        this.shown.fire();
+        return;
+      case 'promptResult':
+        this.answer(message.id, message.value, message.action, message.color);
+        return;
+      case 'noticeAction':
+        this.closeNotice(message.id, message.action);
+        return;
+      default:
+        this.onMessage(message);
     }
-    this.onMessage(message);
   }
 
-  update(live: LiveState, reloadPending?: { alias?: string }, signIn?: SignInState): void {
+  update(live: LiveState, reloadPending?: { alias?: string }, signIn?: SignInState, switching = false): void {
     if (!this.store) {
       return;
     }
@@ -115,16 +312,20 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
       reloadPending,
       signIn,
       hasBackup: this.store.listBackups().length > 0,
+      switching,
     });
 
     this.description = live.kind === 'known' ? live.profile.alias : undefined;
     const expired = profiles.filter((p) => p.status === 'needs-relogin').length;
+    const unsaved = live.kind === 'unknown';
     const reasons = [
       reloadPending ? 'reload this window to use the new account' : undefined,
       expired ? `${expired} account${expired === 1 ? '' : 's'} need${expired === 1 ? 's' : ''} a new sign-in` : undefined,
+      // In place of a "save it?" notification: the tab shows a Save button.
+      unsaved ? "the current login isn't saved yet" : undefined,
     ].filter((reason): reason is string => !!reason);
     this.badge = reasons.length
-      ? { value: expired + (reloadPending ? 1 : 0), tooltip: `Claude Switch: ${reasons.join('; ')}` }
+      ? { value: expired + (reloadPending ? 1 : 0) + (unsaved ? 1 : 0), tooltip: `Claude Switch: ${reasons.join('; ')}` }
       : undefined;
 
     if (this.view) {
@@ -135,6 +336,14 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
   }
 
   dispose(): void {
+    // Let anything still waiting on the user finish as cancelled.
+    for (const pending of this.prompts.splice(0)) {
+      pending.resolve(undefined);
+    }
+    for (const resolve of this.noticeResolvers.values()) {
+      resolve(undefined);
+    }
+    this.noticeResolvers.clear();
     this.stopWatchingLog();
     if (this.logTimer) {
       clearTimeout(this.logTimer);
@@ -159,11 +368,18 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
     this.send({ type: 'log', entries: this.log.entries });
   }
 
+  /** A hidden tab drops messages, so the request stays until the tab confirms it got it. */
   private flushLogRequest(): void {
-    if (this.logRequested && this.view && this.ready) {
-      this.logRequested = false;
-      this.send({ type: 'openLog' });
+    const view = this.view;
+    if (!this.logRequested || !view?.visible || !this.ready) {
+      return;
     }
+    const message: HostMessage = { type: 'openLog' };
+    void view.webview.postMessage(message).then((delivered) => {
+      if (delivered) {
+        this.logRequested = false;
+      }
+    });
   }
 
   private send(message: HostMessage): void {

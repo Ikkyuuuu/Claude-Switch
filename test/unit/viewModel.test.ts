@@ -1,7 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { identityOf } from '../../src/claudeFiles';
 import { ProfileMeta } from '../../src/profileStore';
-import { AVATAR_COLOURS, avatarOf, buildViewState, initialsOf, parseMessage } from '../../src/viewModel';
+import { AVATAR_COLOURS, avatarOf, buildViewState, colourOf, initialsOf, parseMessage } from '../../src/viewModel';
 import { fakeAccount, fakeLogin } from '../fixtures';
 
 function profile(name: string, extra: Partial<ProfileMeta> = {}): ProfileMeta {
@@ -103,6 +103,14 @@ suite('viewModel', () => {
     }
   });
 
+  test('uses the colour the user picked, and ignores invalid ones', () => {
+    assert.equal(colourOf({ id: 'id-Work', color: 11 }), 11);
+    assert.equal(colourOf({ id: 'id-Work', color: 0 }), 0);
+    for (const color of [undefined, -1, 12, 2.5, NaN]) {
+      assert.equal(colourOf({ id: 'id-Work', color }), avatarOf('id-Work'), String(color));
+    }
+  });
+
   test('accepts only well-formed webview messages', () => {
     assert.deepEqual(parseMessage({ type: 'add' }), { type: 'add' });
     assert.deepEqual(parseMessage({ type: 'switch', profileId: 'id-Work', extra: 1 }), { type: 'switch', profileId: 'id-Work' });
@@ -111,6 +119,32 @@ suite('viewModel', () => {
     assert.deepEqual(parseMessage({ type: 'openBilling', url: 'https://evil.example' }), { type: 'openBilling' });
     for (const type of ['copyLog', 'clearLog', 'openOutput']) {
       assert.deepEqual(parseMessage({ type }), { type });
+    }
+    // Dialog answers and notice clicks.
+    assert.deepEqual(parseMessage({ type: 'promptResult', id: 'p1', value: 'Work' }), {
+      type: 'promptResult',
+      id: 'p1',
+      value: 'Work',
+      action: undefined,
+    });
+    assert.deepEqual(parseMessage({ type: 'promptResult', id: 'p1' }), { type: 'promptResult', id: 'p1', value: undefined, action: undefined });
+    assert.deepEqual(parseMessage({ type: 'promptResult', id: 'p1', value: 'Work', color: 4 }), {
+      type: 'promptResult',
+      id: 'p1',
+      value: 'Work',
+      action: undefined,
+      color: 4,
+    });
+    assert.deepEqual(parseMessage({ type: 'noticeAction', id: 'p2', action: 'switch' }), { type: 'noticeAction', id: 'p2', action: 'switch' });
+    for (const bad of [
+      { type: 'promptResult', id: '../x' },
+      { type: 'promptResult', id: 'p1', value: 'x'.repeat(600) },
+      { type: 'promptResult', id: 'p1', action: 'not an id' },
+      { type: 'promptResult', id: 'p1', value: 'Work', color: 12 },
+      { type: 'promptResult', id: 'p1', value: 'Work', color: '4' },
+      { type: 'noticeAction' },
+    ]) {
+      assert.equal(parseMessage(bad), undefined, JSON.stringify(bad));
     }
     for (const bad of [
       null,

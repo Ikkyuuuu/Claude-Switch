@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { MAX_BACKUPS, ProfileStore } from '../../src/profileStore';
-import { fakeLogin, MemorySecrets, MemoryState } from '../fixtures';
+import { EchoingState, fakeLogin, MemorySecrets, MemoryState } from '../fixtures';
 
 suite('ProfileStore', () => {
   let state: MemoryState;
@@ -31,6 +31,17 @@ suite('ProfileStore', () => {
     await store.add('Work', fakeLogin('A', { org: 'org-work' }));
     await store.add('Personal', fakeLogin('A', { org: 'org-personal' }));
     assert.equal(store.list().length, 2);
+  });
+
+  test('edits the name and colour without touching the login', async () => {
+    const login = fakeLogin('A');
+    const profile = await store.add('Work', login);
+    await store.edit(profile.id, { alias: 'Office', color: 9 });
+    const edited = store.get(profile.id);
+    assert.equal(edited?.alias, 'Office');
+    assert.equal(edited?.color, 9);
+    assert.equal(edited?.email, profile.email);
+    assert.deepEqual(await store.getLogin(profile.id), login);
   });
 
   test('refuses to save another account into a profile', async () => {
@@ -75,9 +86,77 @@ suite('ProfileStore', () => {
   test('clearAll leaves nothing behind', async () => {
     const a = await store.add('Work', fakeLogin('A'));
     await store.pushBackup(fakeLogin('A'), { fromProfileId: a.id });
-    await store.dismiss('x');
+    // Written by versions before 0.9.
+    await state.update('roster.dismissedIdentities', ['x']);
     await store.clearAll();
     assert.equal(secrets.data.size, 0);
     assert.equal(state.data.size, 0);
+  });
+
+  test('does not write when nothing changes', async () => {
+    const a = await store.add('Work', fakeLogin('A'));
+    let writes = 0;
+    const update = state.update.bind(state);
+    state.update = async (key, value) => {
+      writes++;
+      await update(key, value);
+    };
+    await store.setStatus(a.id, 'ok');
+    await store.edit(a.id, { alias: 'Work', color: 2 });
+    await store.edit(a.id, { alias: 'Work', color: 2 });
+    assert.equal(writes, 1);
+  });
+
+  test('keeps a rename made while an earlier write is coming back from VS Code', async () => {
+    const echoing = new EchoingState();
+    const racy = new ProfileStore(echoing, new MemorySecrets());
+    const adding = racy.add('Work', fakeLogin('A'));
+    await echoing.settle();
+    const profile = await adding;
+
+    // A background usage update, then a rename, then the usage write's echo lands,
+    // then another background update. Unordered, the echo undid the rename.
+    const usage = racy.setDetails(profile.id, { usage: { fetchedAt: 1, session: { percent: 5 } } });
+    const edit = racy.edit(profile.id, { alias: 'Office', color: 3 });
+    await new Promise((resolve) => setImmediate(resolve));
+    echoing.deliverOne();
+    await new Promise((resolve) => setImmediate(resolve));
+    const status = racy.setStatus(profile.id, 'needs-relogin');
+    await echoing.settle();
+    await Promise.all([usage, edit, status]);
+
+    const saved = racy.get(profile.id);
+    assert.equal(saved?.alias, 'Office');
+    assert.equal(saved?.color, 3);
+    assert.equal(saved?.usage?.session?.percent, 5);
+    assert.equal(saved?.status, 'needs-relogin');
+  });
+
+  test('shows and keeps a rename while an older value comes back from VS Code', async () => {
+    const a = await store.add('Work', fakeLogin('A'));
+    const before = state.get('roster.profiles');
+    await store.edit(a.id, { alias: 'Office', color: 1 });
+    // A moment later, VS Code sends an older write back.
+    await state.update('roster.profiles', before);
+    assert.equal(store.get(a.id)?.alias, 'Office');
+    await store.setStatus(a.id, 'needs-relogin');
+    const stored = state.get<{ alias: string; status: string }[]>('roster.profiles');
+    assert.deepEqual([stored?.[0].alias, stored?.[0].status], ['Office', 'needs-relogin'], 'the next write keeps the rename');
+  });
+
+  test('applies a change again when another window overwrote it', async () => {
+    const a = await store.add('Work', fakeLogin('A'));
+    const update = state.update.bind(state);
+    let overwritten = false;
+    state.update = async (key, value) => {
+      await update(key, value);
+      if (!overwritten) {
+        // Another window's older write arrives just after ours.
+        overwritten = true;
+        await update('roster.profiles', [{ ...a }]);
+      }
+    };
+    await store.edit(a.id, { alias: 'Office', color: 4 });
+    assert.equal(store.get(a.id)?.alias, 'Office');
   });
 });

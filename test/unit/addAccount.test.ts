@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ClaudeLogin, ClaudeLoginOptions, createLoginDir, isValidEmail, removeLoginDir, waitForLogin } from '../../src/addAccount';
+import { ClaudeLogin, ClaudeLoginOptions, createLoginDir, findOnPath, isValidEmail, removeLoginDir, waitForLogin } from '../../src/addAccount';
 import { resolvePaths } from '../../src/claudeFiles';
 import { fakeLogin, writeLive } from '../fixtures';
 
@@ -139,6 +139,21 @@ suite('addAccount', () => {
       await fs.access(other);
     } finally {
       await fs.rm(other, { recursive: true, force: true });
+    }
+  });
+});
+
+suite('findOnPath', () => {
+  test('finds an npm-installed claude.cmd on Windows, and only in absolute PATH folders', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roster-path-'));
+    try {
+      await fs.writeFile(path.join(dir, 'claude.cmd'), '@echo off');
+      const env = { Path: ['relative-dir', dir].join(path.delimiter), PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+      assert.equal(findOnPath('claude', env, 'win32')?.toLowerCase(), path.join(dir, 'claude.cmd').toLowerCase());
+      assert.equal(findOnPath('claude', { Path: 'relative-dir', PATHEXT: '.CMD' }, 'win32'), undefined);
+      assert.equal(findOnPath('missing-tool', env, 'win32'), undefined);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
     }
   });
 });

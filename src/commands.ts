@@ -1,15 +1,18 @@
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { isDateString, nextRenewal } from './accountDetails';
+import { nextRenewal } from './accountDetails';
 import { AccountsView } from './accountsView';
-import { ClaudeLogin, ClaudeLoginOptions, createLoginDir, isValidEmail, removeLoginDir, waitForLogin } from './addAccount';
+import { ClaudeLogin, ClaudeLoginOptions, createLoginDir, findOnPath, isValidEmail, removeLoginDir, waitForLogin } from './addAccount';
 import { delay, identityOf, OAuthAccount, SavedLogin } from './claudeFiles';
 import { errorMessage } from './log';
 import { ProfileMeta, ProfileStore } from './profileStore';
 import { RosterLog } from './rosterLog';
 import { RosterStatusBar } from './statusBar';
-import { LiveState, SwitchEngine } from './switchEngine';
+import { LiveState, LockBusyError, SwitchEngine } from './switchEngine';
+import { askClaudeForUsage, UsageCheckOptions } from './usageCheck';
+import { MAX_ALIAS_LENGTH } from './webview/rules';
+import { colourOf } from './viewModel';
 import { SwitchSignal, WindowSync } from './windowSync';
 
 export interface SwitchArgs {
@@ -18,19 +21,51 @@ export interface SwitchArgs {
   skipConfirm?: boolean;
 }
 
-const MAX_ALIAS_LENGTH = 40;
 const BILLING_URL = 'https://claude.ai/settings/billing';
 const REFRESH_THROTTLE_MS = 30_000;
 
-const SWITCH_DETAIL = [
-  'This window reloads, and any Claude task running in it stops.',
-  'Exit claude sessions running in terminals first: they keep the old account until restarted, and can write it back.',
-  'Other open VS Code windows will offer to reload.',
-].join('\n\n');
+/**
+ * What happens after the login files are swapped. By default the window
+ * reloads, so every Claude process in it restarts on the new account and none
+ * is left holding the old login. Claude Code also starts a fresh `claude`
+ * process for each conversation, which reads the login from disk, so the
+ * instant modes work too, but conversations that were already open keep the
+ * old account and can write it back.
+ */
+type SwitchMode = 'newConversation' | 'instant' | 'restartExtensions' | 'reloadWindow';
 
-type PickAction = 'add' | 'save' | 'reload' | 'log';
+/** 0 means off. Claude reuses usage numbers younger than a minute, so checking more often would not help. */
+function usageCheckSeconds(): number {
+  const seconds = vscode.workspace.getConfiguration('claudeRoster').get<number>('usageCheckSeconds', 60);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.max(60, seconds) : 0;
+}
 
-/** The UI for every command. File and storage work happens in SwitchEngine. */
+function switchMode(): SwitchMode {
+  const mode = vscode.workspace.getConfiguration('claudeRoster').get<string>('switchMode');
+  return mode === 'newConversation' || mode === 'instant' || mode === 'restartExtensions' ? mode : 'reloadWindow';
+}
+
+/** Shown before switching in the modes that interrupt the user. */
+const RESTART_DETAIL: Record<'restartExtensions' | 'reloadWindow', string> = {
+  restartExtensions: [
+    'VS Code restarts its extensions, which takes a few seconds. Your editors and terminals stay open.',
+    'Claude tasks running now stop, and Claude conversations continue on the new account.',
+  ].join('\n\n'),
+  reloadWindow: [
+    'This window reloads, and any Claude task running in it stops.',
+    'Exit claude sessions running in terminals first: they keep the old account until restarted, and can write it back.',
+    'Other open VS Code windows will offer to reload.',
+  ].join('\n\n'),
+};
+
+/** How long after an instant switch to watch for an older conversation writing its login back. */
+const WRITE_BACK_WATCH_MS = 12 * 60 * 60_000;
+
+/**
+ * The UI for every command. Questions, confirmations and messages all appear
+ * inside the Claude Switch tab (see AccountsView); file and storage work
+ * happens in SwitchEngine.
+ */
 export class RosterController implements vscode.Disposable {
   private live: LiveState = { kind: 'signed-out' };
   private lastRefresh = 0;
@@ -39,14 +74,25 @@ export class RosterController implements vscode.Disposable {
   private reloadPending: { alias?: string } | undefined;
   /** The Add Account sign-in running in the background, if any. */
   private signIn: { cli: ClaudeLogin; abort: AbortController; email?: string } | undefined;
-  /** Logins already offered for saving in this window, so the offer is not repeated. */
-  private readonly offered = new Set<string>();
+  /** After an instant switch: the account switched to, and the one before it. */
+  private watch: { profileId: string; alias: string; previousId?: string; until: number } | undefined;
+  private switching = false;
+  /** From the first question of Add Account until the new account is saved. */
+  private addingAccount = false;
+  private usageCheck: Promise<void> | undefined;
+  private lastUsageCheck = 0;
+  private usageCheckFailed = false;
 
-  /** Integration tests replace this, since the test window must not reload. */
+  // Integration tests replace these three, since the test window must not reload or restart.
   reloadWindow: () => Thenable<unknown> = () => vscode.commands.executeCommand('workbench.action.reloadWindow');
+  restartExtensions: () => Thenable<unknown> = () => vscode.commands.executeCommand('workbench.action.restartExtensionHost');
+  /** Opens a new Claude Code conversation, which starts on the account now on disk. */
+  startConversation: () => Thenable<unknown> = () => vscode.commands.executeCommand('claude-vscode.newConversation');
 
   /** Integration tests replace this to sign in with a fake CLI. */
   createLogin: (options: ClaudeLoginOptions) => ClaudeLogin = (options) => new ClaudeLogin(options);
+  /** Integration tests replace this, since the test window's fake login must never reach Anthropic. */
+  askUsage: (options: UsageCheckOptions) => Promise<unknown> = askClaudeForUsage;
 
   constructor(
     private readonly engine: SwitchEngine,
@@ -56,7 +102,13 @@ export class RosterController implements vscode.Disposable {
     private readonly log: RosterLog,
     private readonly sync: WindowSync,
     private readonly testMode: boolean,
-  ) {}
+    /** Claude Switch's own folder, where the CLI runs for usage checks. */
+    private readonly storageDir: string,
+  ) {
+    if (testMode) {
+      this.askUsage = () => Promise.reject(new Error('Usage checks are off under the test runner.'));
+    }
+  }
 
   /** Runs once per window, after activation. */
   async startup(): Promise<void> {
@@ -64,23 +116,26 @@ export class RosterController implements vscode.Disposable {
       this.log.warn(`Could not check the last switch: ${errorMessage(err)}`);
       return { outcome: 'none' as const };
     });
-    await this.refresh({ offerToSave: true });
+    await this.refresh();
     this.startAutoRefresh();
     if (check.outcome === 'mismatch') {
-      const choice = await vscode.window.showWarningMessage(
+      const choice = await this.view.notify(
+        'warning',
         `The switch to "${check.profile.alias}" did not stick: another Claude process changed the login while this window reloaded. Exit running claude sessions, then switch again.`,
-        'Switch Again',
-        'Show Log',
+        [
+          { id: 'again', label: 'Switch again', style: 'primary' },
+          { id: 'log', label: 'Show log' },
+        ],
       );
-      if (choice === 'Switch Again') {
+      if (choice === 'again') {
         await this.switchAccount({ profileId: check.profile.id });
-      } else if (choice === 'Show Log') {
+      } else if (choice === 'log') {
         this.showLog();
       }
     }
   }
 
-  async refresh(options: { offerToSave?: boolean } = {}): Promise<LiveState> {
+  async refresh(): Promise<LiveState> {
     this.inFlight ??= this.engine.refresh().finally(() => {
       this.inFlight = undefined;
     });
@@ -91,16 +146,68 @@ export class RosterController implements vscode.Disposable {
     }
     this.lastRefresh = Date.now();
     this.render();
-    if (options.offerToSave && this.live.kind === 'unknown') {
-      void this.offerToSave(this.live.login.account);
-    }
+    void this.checkWriteBack();
     return this.live;
+  }
+
+  /**
+   * After an instant switch, Claude conversations that were already open still
+   * hold the old login. One can rewrite .claude.json with the old oauthAccount,
+   * which is put back quietly, or save its old tokens when it refreshes them,
+   * which only closing that conversation fixes, so the user is told.
+   */
+  private async checkWriteBack(): Promise<void> {
+    const watch = this.watch;
+    const live = this.live;
+    if (!watch) {
+      return;
+    }
+    if (Date.now() > watch.until) {
+      this.watch = undefined;
+      return;
+    }
+    if (live.kind === 'known' && live.profile.id === watch.profileId) {
+      return;
+    }
+    this.watch = undefined;
+    // An account mix-up shows as an error; any other change was presumably on purpose.
+    if (live.kind !== 'error' && !(live.kind === 'known' && live.profile.id === watch.previousId)) {
+      return;
+    }
+    let outcome: Awaited<ReturnType<SwitchEngine['keepSwitch']>>;
+    try {
+      outcome = await this.engine.keepSwitch(watch.profileId);
+    } catch (err) {
+      // Still busy after waiting, or the files were unreadable; look again on the next refresh.
+      this.log.warn(`Could not check the switch to "${watch.alias}": ${errorMessage(err)}`);
+      this.watch = watch;
+      return;
+    }
+    if (outcome === 'none') {
+      return;
+    }
+    // 'ok' with an error: the account is right, but the tokens next to it are another account's.
+    if (outcome === 'repaired' || (outcome === 'ok' && live.kind !== 'error')) {
+      this.watch = watch;
+      await this.refresh();
+      return;
+    }
+    const back = live.kind === 'known' ? `changed back to "${live.profile.alias}"` : 'was overwritten';
+    this.log.warn(`Claude's login ${back} after switching to "${watch.alias}"; an older Claude conversation probably saved its old login.`);
+    const choice = await this.view.notify(
+      'warning',
+      `Claude's login ${back}. A Claude conversation that was open before you switched to "${watch.alias}" probably saved its old login when it refreshed. Close older conversations, then switch again.`,
+      [{ id: 'again', label: `Switch to "${watch.alias}"`, style: 'primary' }],
+    );
+    if (choice === 'again') {
+      await this.switchAccount({ profileId: watch.profileId });
+    }
   }
 
   /** Cheap re-check when the window regains focus, in case Claude signed in or refreshed. */
   refreshIfStale(): void {
     if (Date.now() - this.lastRefresh > REFRESH_THROTTLE_MS) {
-      void this.refresh({ offerToSave: true });
+      void this.refresh();
     }
   }
 
@@ -117,11 +224,56 @@ export class RosterController implements vscode.Disposable {
     this.autoRefreshTimer = setInterval(
       () => {
         if (vscode.window.state.focused) {
-          void this.refresh();
+          void this.refresh().then(() => this.checkUsageIfDue());
         }
       },
       Math.max(5, seconds) * 1000,
     );
+  }
+
+  /**
+   * Claude Code saves usage to .claude.json only now and then, so every
+   * claudeRoster.usageCheckSeconds, while the tab shows and the window is
+   * focused, ask Claude for the current numbers.
+   */
+  checkUsageIfDue(): void {
+    const seconds = usageCheckSeconds();
+    if (
+      seconds &&
+      !this.usageCheck &&
+      this.live.kind === 'known' &&
+      this.view.visible &&
+      vscode.window.state.focused &&
+      Date.now() - this.lastUsageCheck >= seconds * 1000
+    ) {
+      void this.checkUsage();
+    }
+  }
+
+  /** Asks Claude Code's CLI for the live account's usage now. See usageCheck.ts. */
+  checkUsage(): Promise<void> {
+    this.usageCheck ??= this.runUsageCheck().finally(() => {
+      this.usageCheck = undefined;
+    });
+    return this.usageCheck;
+  }
+
+  private async runUsageCheck(): Promise<void> {
+    this.lastUsageCheck = Date.now();
+    const claude = resolveClaude();
+    try {
+      const updated = await this.engine.checkUsage(() => this.askUsage({ command: claude.command, cwd: this.storageDir }));
+      this.usageCheckFailed = false;
+      if (updated) {
+        await this.refresh();
+      }
+    } catch (err) {
+      // Busy: a switch is running, in this window or another. Try again next time.
+      if (!(err instanceof LockBusyError) && !this.usageCheckFailed) {
+        this.usageCheckFailed = true;
+        this.log.warn(`Could not get the current usage from Claude, so the tab shows the numbers Claude Code last saved: ${errorMessage(err)}`);
+      }
+    }
   }
 
   private stopAutoRefresh(): void {
@@ -131,117 +283,130 @@ export class RosterController implements vscode.Disposable {
     }
   }
 
+  /** Without a profileId (status bar, Command Palette), opens the tab, which is the account picker. */
   async switchAccount(args: SwitchArgs = {}): Promise<void> {
-    const live = await this.refresh();
-    let profile: ProfileMeta | undefined;
-    if (args.profileId) {
-      profile = this.store.get(args.profileId);
-      if (!profile) {
-        void vscode.window.showErrorMessage('That account is no longer saved in Claude Switch.');
-        return;
-      }
-    } else {
-      const picked = await this.pickForSwitch(live);
-      if (picked === 'add') {
-        return this.addAccount();
-      } else if (picked === 'save' && live.kind === 'unknown') {
-        await this.saveCurrentLogin(live.login.account);
-        return;
-      } else if (picked === 'reload') {
-        await this.reloadWindow();
-        return;
-      } else if (picked === 'log') {
-        this.showLog();
-        return;
-      } else if (typeof picked !== 'object') {
-        return;
-      }
-      profile = picked;
+    if (!args.profileId) {
+      await this.refresh();
+      this.view.reveal();
+      return;
     }
+    // Clicks while a switch is under way are ignored; the tab shows its progress.
+    if (this.switching) {
+      return;
+    }
+    this.switching = true;
+    try {
+      await this.switchToProfile(args.profileId, args.skipConfirm);
+    } finally {
+      this.switching = false;
+      this.render();
+    }
+  }
 
+  private async switchToProfile(profileId: string, skipConfirmInTests?: boolean): Promise<void> {
+    const live = await this.refresh();
+    const profile = this.store.get(profileId);
+    if (!profile) {
+      void this.view.notify('error', 'That account is no longer saved in Claude Switch.');
+      return;
+    }
     if (live.kind === 'known' && live.profile.id === profile.id) {
-      void vscode.window.showInformationMessage(`"${profile.alias}" is already the active Claude account.`);
+      void this.view.notify('info', `"${profile.alias}" is already the active Claude account.`);
       return;
     }
     if (profile.status === 'needs-relogin') {
-      const choice = await vscode.window.showWarningMessage(
-        `The saved login for "${profile.alias}" has expired.`,
-        { modal: true, detail: 'Sign in to it again in your browser. Your current login is not affected.' },
-        'Sign In Again',
-        'Switch Anyway',
-      );
-      if (choice === 'Sign In Again') {
-        return this.addAccount(isValidEmail(profile.email) ? profile.email : undefined);
-      } else if (choice !== 'Switch Anyway') {
+      const choice = await this.view.confirm({
+        title: `The saved login for "${profile.alias}" has expired`,
+        message: 'Sign in to it again in your browser. Your current login is not affected.',
+        actions: [
+          { id: 'signin', label: 'Sign in again', style: 'primary' },
+          { id: 'switch', label: 'Switch anyway' },
+        ],
+      });
+      if (choice === 'signin') {
+        // Not awaited: signing in takes a while, and switching should not stay blocked meanwhile.
+        void this.addAccount(isValidEmail(profile.email) ? profile.email : undefined);
+        return;
+      } else if (choice !== 'switch') {
         return;
       }
     }
     if (live.kind === 'unknown') {
-      const choice = await vscode.window.showWarningMessage(
-        'Save the current login before switching?',
-        {
-          modal: true,
-          detail: `Claude is signed in as ${live.login.account.emailAddress}, which isn't saved in Claude Switch. Save it to be able to switch back. A backup is kept either way.`,
-        },
-        'Save and Switch',
-        'Switch Without Saving',
-      );
-      if (choice === undefined) {
+      const choice = await this.view.confirm({
+        title: 'Save the current login first?',
+        message: `Claude is signed in as ${live.login.account.emailAddress}, which isn't saved in Claude Switch. Save it to be able to switch back. A backup is kept either way.`,
+        actions: [
+          { id: 'save', label: 'Save and switch', style: 'primary' },
+          { id: 'skip', label: 'Switch without saving' },
+        ],
+      });
+      if (!choice) {
         return;
       }
-      if (choice === 'Save and Switch' && !(await this.saveCurrentLogin(live.login.account))) {
+      if (choice === 'save' && !(await this.saveCurrentLogin(live.login.account))) {
         return;
       }
     }
-    const skipConfirm = this.testMode && args.skipConfirm;
-    if (!skipConfirm && vscode.workspace.getConfiguration('claudeRoster').get<boolean>('confirmBeforeSwitch', true)) {
-      const choice = await vscode.window.showWarningMessage(
-        `Switch Claude to "${profile.alias}"?`,
-        { modal: true, detail: SWITCH_DETAIL },
-        'Switch and Reload',
-      );
-      if (choice !== 'Switch and Reload') {
+    // Instant switches interrupt nothing, so only the restarting modes ask first.
+    const mode = switchMode();
+    const skipConfirm = this.testMode && skipConfirmInTests;
+    if (
+      (mode === 'restartExtensions' || mode === 'reloadWindow') &&
+      !skipConfirm &&
+      vscode.workspace.getConfiguration('claudeRoster').get<boolean>('confirmBeforeSwitch', true)
+    ) {
+      const choice = await this.view.confirm({
+        title: `Switch Claude to "${profile.alias}"?`,
+        message: RESTART_DETAIL[mode],
+        actions: [{ id: 'switch', label: mode === 'reloadWindow' ? 'Switch and reload' : 'Switch and restart', style: 'primary' }],
+      });
+      if (choice !== 'switch') {
         return;
       }
     }
 
     const target = profile;
-    await this.applyAndReload(`Switching Claude to "${target.alias}"…`, async () => {
+    await this.applyAndActivate(`Switching Claude to "${target.alias}"…`, async () => {
       const result = await this.engine.switchTo(target.id);
       if (result.outcome === 'already-active') {
-        void vscode.window.showInformationMessage(`"${target.alias}" is already the active Claude account.`);
+        void this.view.notify('info', `"${target.alias}" is already the active Claude account.`);
         return undefined;
       }
-      return { alias: result.profile.alias };
+      return { alias: result.profile.alias, profileId: result.profile.id };
     });
   }
 
   /** defaultEmail pre-fills the prompt, for signing in again to a saved account. */
   async addAccount(defaultEmail?: string): Promise<void> {
-    if (this.signIn) {
-      void vscode.commands.executeCommand('claudeRoster.accounts.focus');
-      void vscode.window.showInformationMessage('A sign-in is already in progress in the Claude Switch tab.');
+    if (this.addingAccount) {
+      // The tab already shows the sign-in in progress, or its first question.
+      this.view.reveal();
       return;
     }
-    const email = await vscode.window.showInputBox({
-      title: 'Claude Switch: Add Account',
-      prompt: 'Email of the account to add. Optional: it pre-fills the sign-in page. Press Enter to skip.',
-      placeHolder: 'name@example.com',
-      value: defaultEmail,
-      ignoreFocusOut: true,
-      validateInput: (value) =>
-        !value.trim() || isValidEmail(value.trim()) ? undefined : 'Enter a valid email address, or leave it empty.',
-    });
-    if (email === undefined) {
-      return;
-    }
-    const login = await this.signInInBackground(email.trim() || undefined);
-    if (login) {
-      await this.saveSignedInLogin(login);
+    this.addingAccount = true;
+    try {
+      const email = await this.view.input({
+        title: 'Add an account',
+        message: 'Email of the account to add. Optional: it pre-fills the sign-in page.',
+        placeholder: 'name@example.com',
+        value: defaultEmail,
+        rule: 'email',
+        optional: true,
+        confirmLabel: 'Continue',
+      });
+      if (email === undefined) {
+        return;
+      }
+      const login = await this.signInInBackground(email || undefined);
+      if (login) {
+        await this.saveSignedInLogin(login);
+      }
+    } finally {
+      this.addingAccount = false;
     }
   }
 
-  /** "Open sign-in page" in the Accounts view. */
+  /** "Open page" on the sign-in card. */
   async signInOpenPage(): Promise<void> {
     const url = this.signIn?.cli.url;
     if (url) {
@@ -249,35 +414,33 @@ export class RosterController implements vscode.Disposable {
     }
   }
 
-  /** "Copy sign-in link" in the Accounts view. */
+  /** "Copy link" on the sign-in card. */
   async signInCopyLink(): Promise<void> {
     const url = this.signIn?.cli.url;
     if (url) {
       await vscode.env.clipboard.writeText(url);
-      void vscode.window.showInformationMessage(
-        'Sign-in link copied. Open it in a private window, or a browser signed in to the account to add.',
-      );
+      void this.view.notify('success', 'Sign-in link copied. Open it in a private window, or a browser signed in to the account to add.');
     }
   }
 
-  /** "Paste code…" in the Accounts view, for when the sign-in page shows a code instead of finishing. */
+  /** "Paste Sign-in Code" from the Command Palette; the sign-in card has its own code box. */
   async signInPasteCode(): Promise<void> {
     const signIn = this.signIn;
     if (!signIn) {
       return;
     }
-    const code = await vscode.window.showInputBox({
-      title: 'Claude Switch: Paste Code',
-      prompt: 'Paste the code the sign-in page shows after you approve access.',
-      ignoreFocusOut: true,
-      validateInput: (value) => (value.trim() ? undefined : 'Paste the code from the sign-in page.'),
+    const code = await this.view.input({
+      title: 'Paste the sign-in code',
+      message: 'Paste the code the sign-in page shows after you approve access.',
+      rule: 'code',
+      confirmLabel: 'Submit',
     });
     if (code && this.signIn === signIn) {
       this.signInSendCode(code);
     }
   }
 
-  /** Sends the code from the sign-in page, typed into the Accounts view or the prompt above. */
+  /** Sends the code from the sign-in page to the waiting `claude auth login`. */
   signInSendCode(code: string): void {
     if (!this.signIn) {
       return;
@@ -294,22 +457,27 @@ export class RosterController implements vscode.Disposable {
     this.signIn?.abort.abort();
   }
 
-  /** profileId comes from a row in the Accounts view; without it, a picker opens. */
-  async renameAccount(profileId?: string): Promise<void> {
-    const profile = profileId ? this.store.get(profileId) : await this.pickProfile('Select the account to rename');
+  /** Changes an account's name and avatar colour. profileId comes from the tab; without it, the tab asks which account. */
+  async editAccount(profileId?: string): Promise<void> {
+    const profile = profileId ? this.store.get(profileId) : await this.pickProfile('Which account do you want to edit?');
     if (!profile) {
       return;
     }
-    const alias = await this.promptAlias(`New name for ${profile.email}`, profile.alias, profile.id);
-    if (!alias || alias === profile.alias) {
+    const color = colourOf(profile);
+    const taken = this.store
+      .list()
+      .filter((p) => p.id !== profile.id)
+      .map((p) => p.alias);
+    const result = await this.view.editProfile({ title: 'Edit account', message: profile.email, value: profile.alias, taken, color, confirmLabel: 'Save' });
+    if (!result || (result.alias === profile.alias && result.color === color)) {
       return;
     }
-    await this.store.rename(profile.id, alias);
-    this.log.info(`Renamed "${profile.alias}" to "${alias}".`);
+    await this.store.edit(profile.id, result);
+    this.log.info(result.alias === profile.alias ? `Changed the colour of "${profile.alias}".` : `Renamed "${profile.alias}" to "${result.alias}".`);
     await this.refresh();
   }
 
-  /** profileId comes from a row in the Accounts view; without it, a picker opens. */
+  /** profileId comes from the tab; without it, the tab asks which account. */
   async removeAccount(profileId?: string): Promise<void> {
     const live = await this.refresh();
     const activeId = live.kind === 'known' ? live.profile.id : undefined;
@@ -317,44 +485,44 @@ export class RosterController implements vscode.Disposable {
     if (profileId) {
       profile = this.store.get(profileId);
       if (profile?.id === activeId) {
-        void vscode.window.showInformationMessage("The active account can't be removed. Switch to another account first.");
+        void this.view.notify('info', "The active account can't be removed. Switch to another account first.");
         return;
       }
     } else {
       const candidates = this.store.list().filter((p) => p.id !== activeId);
       if (candidates.length === 0) {
-        void vscode.window.showInformationMessage(
+        void this.view.notify(
+          'info',
           activeId ? "The active account can't be removed. Switch to another account first." : 'No accounts are saved yet.',
         );
         return;
       }
       profile = await this.pickProfile(
-        activeId ? 'Select the account to remove (the active account is not listed)' : 'Select the account to remove',
+        'Which account do you want to remove?',
         candidates,
+        activeId ? 'The active account is not listed; switch away from it to remove it.' : undefined,
       );
     }
     if (!profile) {
       return;
     }
-    const choice = await vscode.window.showWarningMessage(
-      `Remove "${profile.alias}" from Claude Switch?`,
-      {
-        modal: true,
-        detail: `The saved login for ${profile.email} and its backups are deleted from this device. Your Anthropic account is not affected.`,
-      },
-      'Remove',
-    );
-    if (choice !== 'Remove') {
+    const choice = await this.view.confirm({
+      title: `Remove "${profile.alias}"?`,
+      message: `The saved login for ${profile.email} and its backups are deleted from this device. Your Anthropic account is not affected.`,
+      actions: [{ id: 'remove', label: 'Remove', style: 'danger' }],
+    });
+    if (choice !== 'remove') {
       return;
     }
     const now = await this.refresh();
     if (now.kind === 'known' && now.profile.id === profile.id) {
-      void vscode.window.showWarningMessage(`"${profile.alias}" became the active account, so it was not removed.`);
+      void this.view.notify('warning', `"${profile.alias}" became the active account, so it was not removed.`);
       return;
     }
     await this.store.remove(profile.id);
     this.log.info(`Removed "${profile.alias}".`);
     await this.refresh();
+    void this.view.notify('success', `Removed "${profile.alias}".`);
   }
 
   async recapture(): Promise<void> {
@@ -369,13 +537,13 @@ export class RosterController implements vscode.Disposable {
     this.render();
     switch (live.kind) {
       case 'known':
-        void vscode.window.showInformationMessage(`Saved the current login into "${live.profile.alias}".`);
+        void this.view.notify('success', `Saved the current login into "${live.profile.alias}".`);
         break;
       case 'unknown':
         await this.saveCurrentLogin(live.login.account);
         break;
       case 'signed-out':
-        void vscode.window.showWarningMessage('Claude Code is not signed in. Sign in with /login first.');
+        void this.view.notify('warning', 'Claude Code is not signed in. Sign in with /login first.');
         break;
       case 'error':
         this.showError(live.message);
@@ -385,43 +553,43 @@ export class RosterController implements vscode.Disposable {
 
   /** Lets the user replace the estimated renewal date with the real one. */
   async setRenewal(profileId?: string): Promise<void> {
-    const profile = profileId ? this.store.get(profileId) : await this.pickProfile('Select the account to set a renewal date for');
+    const profile = profileId ? this.store.get(profileId) : await this.pickProfile('Which account do you want to set a renewal date for?');
     if (!profile) {
       return;
     }
     const shown = nextRenewal(profile.plan, profile.renewal, Date.now());
-    const date = await vscode.window.showInputBox({
-      title: `Claude Switch: Renewal Date for ${profile.alias}`,
-      prompt: profile.renewal
-        ? 'Next renewal date (YYYY-MM-DD). Leave empty to go back to the estimate.'
-        : 'Next renewal date (YYYY-MM-DD), as shown on the claude.ai billing page.',
+    const date = await this.view.input({
+      title: `Renewal date for "${profile.alias}"`,
+      message: profile.renewal
+        ? 'The next renewal date. Leave it empty to go back to the estimate.'
+        : 'The next renewal date, as shown on the claude.ai billing page.',
       value: shown?.date ?? '',
-      placeHolder: 'YYYY-MM-DD',
-      ignoreFocusOut: true,
-      validateInput: (value) =>
-        !value.trim() || isDateString(value.trim()) ? undefined : 'Enter a real date as YYYY-MM-DD, for example 2026-11-14.',
+      placeholder: 'YYYY-MM-DD',
+      rule: 'date',
+      optional: true,
+      confirmLabel: 'Next',
     });
     if (date === undefined) {
       return;
     }
-    if (!date.trim()) {
+    if (!date) {
       await this.store.setRenewal(profile.id, undefined);
       this.log.info(`Cleared the renewal date for "${profile.alias}".`);
       await this.refresh();
       return;
     }
-    const cycle = await vscode.window.showQuickPick(
-      [
-        { label: 'Monthly', value: 'monthly' as const },
-        { label: 'Yearly', value: 'yearly' as const },
+    const cycle = await this.view.confirm({
+      title: 'How often does it renew?',
+      actions: [
+        { id: 'monthly', label: 'Monthly', style: 'primary' },
+        { id: 'yearly', label: 'Yearly' },
       ],
-      { title: 'Claude Switch: Billing Cycle', placeHolder: 'How often does this subscription renew?' },
-    );
-    if (!cycle) {
+    });
+    if (cycle !== 'monthly' && cycle !== 'yearly') {
       return;
     }
-    await this.store.setRenewal(profile.id, { date: date.trim(), cycle: cycle.value });
-    this.log.info(`Set a ${cycle.value} renewal date for "${profile.alias}".`);
+    await this.store.setRenewal(profile.id, { date, cycle });
+    this.log.info(`Set a ${cycle} renewal date for "${profile.alias}".`);
     await this.refresh();
   }
 
@@ -437,10 +605,10 @@ export class RosterController implements vscode.Disposable {
         await this.saveCurrentLogin(live.login.account);
         break;
       case 'known':
-        void vscode.window.showInformationMessage(`The current login is already saved as "${live.profile.alias}".`);
+        void this.view.notify('info', `The current login is already saved as "${live.profile.alias}".`);
         break;
       case 'signed-out':
-        void vscode.window.showWarningMessage('Claude Code is not signed in. Sign in with /login first.');
+        void this.view.notify('warning', 'Claude Code is not signed in. Sign in with /login first.');
         break;
       case 'error':
         this.showError(live.message);
@@ -451,25 +619,22 @@ export class RosterController implements vscode.Disposable {
   async restoreBackup(): Promise<void> {
     const latest = this.store.listBackups()[0];
     if (!latest) {
-      void vscode.window.showInformationMessage('There is no backup yet. Claude Switch saves one before every switch.');
+      void this.view.notify('info', 'There is no backup yet. Claude Switch saves one before every switch.');
       return;
     }
     const from = latest.fromProfileId ? this.store.get(latest.fromProfileId)?.alias : undefined;
     const to = latest.toProfileId ? this.store.get(latest.toProfileId)?.alias : undefined;
-    const choice = await vscode.window.showWarningMessage(
-      'Restore the login from before the last switch?',
-      {
-        modal: true,
-        detail: `Backup taken ${new Date(latest.at).toLocaleString()}, when switching from ${from ? `"${from}"` : 'an unsaved or removed login'} to ${to ? `"${to}"` : 'another account'}. This window will reload.`,
-      },
-      'Restore and Reload',
-    );
-    if (choice !== 'Restore and Reload') {
+    const choice = await this.view.confirm({
+      title: 'Restore the login from before the last switch?',
+      message: `Backup taken ${new Date(latest.at).toLocaleString()}, when switching from ${from ? `"${from}"` : 'an unsaved or removed login'} to ${to ? `"${to}"` : 'another account'}.`,
+      actions: [{ id: 'restore', label: 'Restore', style: 'primary' }],
+    });
+    if (choice !== 'restore') {
       return;
     }
-    await this.applyAndReload('Restoring the Claude login backup…', async () => {
+    await this.applyAndActivate('Restoring the Claude login backup…', async () => {
       const { profile } = await this.engine.restoreBackup(latest.slot);
-      return { alias: profile?.alias };
+      return { alias: profile?.alias, profileId: profile?.id };
     });
   }
 
@@ -479,53 +644,60 @@ export class RosterController implements vscode.Disposable {
   }
 
   async forgetAll(): Promise<void> {
-    const choice = await vscode.window.showWarningMessage(
-      'Remove all accounts and backups saved by Claude Switch?',
-      {
-        modal: true,
-        detail: 'Every saved login is deleted from this device. The login Claude Code is using right now stays as it is.',
-      },
-      'Remove All',
-    );
-    if (choice !== 'Remove All') {
+    const choice = await this.view.confirm({
+      title: 'Remove all accounts and backups?',
+      message: 'Every login Claude Switch saved is deleted from this device. The login Claude Code is using right now stays as it is.',
+      actions: [{ id: 'remove', label: 'Remove all', style: 'danger' }],
+    });
+    if (choice !== 'remove') {
       return;
     }
     await this.store.clearAll();
-    this.offered.clear();
     this.log.info('Removed all saved accounts and backups.');
     await this.refresh();
+    void this.view.notify('success', 'Removed all saved accounts and backups.');
   }
 
-  /** Another window switched accounts: this window's Claude still runs the old login. */
+  /**
+   * Another window switched accounts. New Claude conversations here pick up the
+   * new login on their own; only the restarting modes ask this window to reload.
+   */
   async onRemoteSwitch(signal: SwitchSignal): Promise<void> {
-    this.reloadPending = { alias: signal.alias };
+    // The user chose another account on purpose; this window's watch no longer applies.
+    this.watch = undefined;
+    const mode = switchMode();
+    if (mode === 'restartExtensions' || mode === 'reloadWindow') {
+      this.reloadPending = { alias: signal.alias };
+    }
     await this.refresh();
-    const choice = await vscode.window.showInformationMessage(
-      `The Claude account was switched${signal.alias ? ` to "${signal.alias}"` : ''} in another window. Reload this window so Claude Code uses it?`,
-      'Reload Now',
-      'Later',
-    );
-    if (choice === 'Reload Now') {
-      await this.reloadWindow();
+    if (!this.reloadPending) {
+      void this.view.notify(
+        'info',
+        `Switched to ${signal.alias ? `"${signal.alias}"` : 'another account'} in another window. New Claude conversations here use it too.`,
+      );
     }
   }
 
   dispose(): void {
     this.stopAutoRefresh();
     this.signIn?.cli.cancel();
-    this.offered.clear();
   }
 
   private render(): void {
     this.statusBar.update(this.live, this.reloadPending);
     const signIn = this.signIn && { email: this.signIn.email, url: this.signIn.cli.url };
-    this.view.update(this.live, this.reloadPending, signIn);
+    this.view.update(this.live, this.reloadPending, signIn, this.switching);
   }
 
-  private async applyAndReload(title: string, apply: () => Promise<{ alias?: string } | undefined>): Promise<void> {
-    let applied: { alias?: string } | undefined;
+  /** Swaps the login, then makes Claude Code use it as claudeRoster.switchMode says. */
+  private async applyAndActivate(
+    title: string,
+    apply: () => Promise<{ alias?: string; profileId?: string } | undefined>,
+  ): Promise<void> {
+    const previousId = this.live.kind === 'known' ? this.live.profile.id : undefined;
+    let applied: { alias?: string; profileId?: string } | undefined;
     try {
-      applied = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title }, apply);
+      applied = await this.view.busy(title, apply);
     } catch (err) {
       await this.refresh();
       this.showError(err);
@@ -535,16 +707,59 @@ export class RosterController implements vscode.Disposable {
       return;
     }
     this.reloadPending = undefined;
-    await this.refresh();
     await this.sync.publish(applied.alias).catch((err) => {
       this.log.warn(`Could not notify other windows: ${errorMessage(err)}`);
     });
-    await this.reloadWindow();
+
+    const mode = switchMode();
+    if (mode === 'reloadWindow' || mode === 'restartExtensions') {
+      await this.refresh();
+      await (mode === 'reloadWindow' ? this.reloadWindow() : this.restartExtensions());
+      return;
+    }
+
+    // Instant: nothing restarts. New conversations read the new login from disk.
+    // The watch below replaces the after-reload check, which no window should run for this switch.
+    await this.store.setLastSwitch(undefined).catch(() => undefined);
+    const alias = applied.alias ?? 'the new account';
+    this.watch = applied.profileId ? { profileId: applied.profileId, alias, previousId, until: Date.now() + WRITE_BACK_WATCH_MS } : undefined;
+    await this.refresh();
+    // The new account's numbers are from when it was last active.
+    if (usageCheckSeconds()) {
+      void this.checkUsage();
+    }
+    let opened = false;
+    if (mode === 'newConversation') {
+      opened = await this.openConversation();
+    }
+    // Not awaited: the switch is done, and the next one should not wait for this notice to close.
+    void this.view
+      .notify(
+        'success',
+        `Switched to "${alias}". ${opened ? 'A new Claude conversation is open on it.' : 'New Claude conversations use it.'} Conversations that were already open keep the previous account until you start a new one.`,
+        opened ? [] : [{ id: 'new', label: 'New conversation', style: 'primary' }],
+      )
+      .then((choice) => {
+        if (choice === 'new') {
+          void this.openConversation();
+        }
+      });
+  }
+
+  private async openConversation(): Promise<boolean> {
+    try {
+      await this.startConversation();
+      return true;
+    } catch (err) {
+      // Claude Code may be missing or disabled; the switch itself still worked.
+      this.log.warn(`Could not open a new Claude Code conversation: ${errorMessage(err)}`);
+      return false;
+    }
   }
 
   /**
    * Runs `claude auth login` hidden, with its own CLAUDE_CONFIG_DIR, so the live
-   * login is never touched. Progress and fallbacks show in the Accounts view.
+   * login is never touched. The tab's sign-in card shows progress and fallbacks.
    */
   private async signInInBackground(email?: string): Promise<SavedLogin | undefined> {
     const claude = resolveClaude();
@@ -562,7 +777,7 @@ export class RosterController implements vscode.Disposable {
     const stopWatchingUrl = cli.onUrl(() => this.render());
     void vscode.commands.executeCommand('setContext', 'claudeRoster.signingIn', true);
     this.render();
-    void vscode.commands.executeCommand('claudeRoster.accounts.focus');
+    this.view.reveal();
     this.log.info(`Add Account: started a background sign-in with the Claude CLI from ${claude.source}.`);
 
     let failure: string | undefined;
@@ -587,16 +802,7 @@ export class RosterController implements vscode.Disposable {
 
     let login: SavedLogin | undefined;
     try {
-      login = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'Claude Switch', cancellable: true },
-        (progress, token) => {
-          progress.report({
-            message: 'Finish signing in in your browser. The Claude Switch tab can reopen the page or take a code.',
-          });
-          token.onCancellationRequested(() => abort.abort());
-          return waitForLogin(dir, { signal: abort.signal, intervalMs: 1000 });
-        },
-      );
+      login = await waitForLogin(dir, { signal: abort.signal, intervalMs: 1000 });
     } catch (err) {
       if (!failure && !abort.signal.aborted) {
         failure = errorMessage(err);
@@ -615,10 +821,13 @@ export class RosterController implements vscode.Disposable {
 
     if (failure) {
       this.log.error(`Add Account: ${failure}`);
-      const choice = await vscode.window.showErrorMessage(failure, 'Sign In in Terminal', 'Show Log');
-      if (choice === 'Sign In in Terminal') {
+      const choice = await this.view.notify('error', failure, [
+        { id: 'terminal', label: 'Sign in in a terminal' },
+        { id: 'log', label: 'Show log' },
+      ]);
+      if (choice === 'terminal') {
         return this.signInInTerminal(claude.command);
-      } else if (choice === 'Show Log') {
+      } else if (choice === 'log') {
         this.showLog();
       }
     }
@@ -626,8 +835,8 @@ export class RosterController implements vscode.Disposable {
   }
 
   /**
-   * Fallback: runs the Claude CLI itself as a terminal, with its own
-   * CLAUDE_CONFIG_DIR, for when the background sign-in does not work.
+   * Fallback, only on request: runs the Claude CLI itself as a terminal, with
+   * its own CLAUDE_CONFIG_DIR, for when the background sign-in does not work.
    */
   private async signInInTerminal(command: string): Promise<SavedLogin | undefined> {
     const dir = await createLoginDir();
@@ -649,15 +858,8 @@ export class RosterController implements vscode.Disposable {
     this.log.info('Add Account: opened an isolated sign-in terminal.');
     try {
       terminal.show();
-      return await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'Claude Switch', cancellable: true },
-        (progress, token) => {
-          progress.report({
-            message: 'Sign in with the account to add in the terminal. If Claude does not ask you to, type /login.',
-          });
-          token.onCancellationRequested(() => abort.abort());
-          return waitForLogin(dir, { signal: abort.signal });
-        },
+      return await this.view.busy('Sign in in the terminal. If Claude does not ask you to, type /login. Close the terminal to cancel.', () =>
+        waitForLogin(dir, { signal: abort.signal }),
       );
     } catch (err) {
       if (abort.signal.aborted) {
@@ -680,7 +882,8 @@ export class RosterController implements vscode.Disposable {
       await removeLoginDir(dir);
     } catch (err) {
       this.log.warn(`Could not delete the sign-in folder: ${errorMessage(err)}`);
-      void vscode.window.showWarningMessage(
+      void this.view.notify(
+        'warning',
         `Claude Switch could not delete its temporary sign-in folder, which contains login tokens. Delete it manually: ${dir}`,
       );
     }
@@ -690,79 +893,63 @@ export class RosterController implements vscode.Disposable {
     const email = login.account.emailAddress;
     const existing = this.store.findByAccount(login.account);
     if (!existing) {
-      const alias = await this.promptAlias(`Name for ${email}`, this.suggestAlias(login.account));
+      const alias = await this.promptAlias('Name this account', `A name for ${email}, such as Work or Personal.`, this.suggestAlias(login.account));
       if (!alias) {
         return;
       }
       const profile = await this.store.add(alias, login);
       this.log.info(`Added "${profile.alias}".`);
       await this.refresh();
-      const choice = await vscode.window.showInformationMessage(`Added "${profile.alias}" (${email}).`, 'Switch Now');
-      if (choice === 'Switch Now') {
-        await this.switchAccount({ profileId: profile.id });
-      }
+      void this.view
+        .notify('success', `Added "${profile.alias}" (${email}).`, [{ id: 'switch', label: 'Switch now', style: 'primary' }])
+        .then((choice) => (choice === 'switch' ? this.switchAccount({ profileId: profile.id }) : undefined));
       return;
     }
 
-    const choice = await vscode.window.showInformationMessage(
-      `${email} is already saved as "${existing.alias}". Replace its saved login with this sign-in?`,
-      {
-        modal: true,
-        detail:
-          'Meant to add a different account? Your browser is probably signed in to this one. Sign out of claude.ai there, or use "Copy sign-in link" in a private window, and add the account again.',
-      },
-      'Replace',
-    );
-    if (choice !== 'Replace') {
+    const choice = await this.view.confirm({
+      title: `${email} is already saved as "${existing.alias}"`,
+      message:
+        'Replace its saved login with this sign-in?\n\nMeant to add a different account? Your browser is probably signed in to this one. Sign out of claude.ai there, or use "Copy link" in a private window, and add the account again.',
+      actions: [{ id: 'replace', label: 'Replace', style: 'primary' }],
+    });
+    if (choice !== 'replace') {
       return;
     }
     await this.store.updateLogin(existing.id, login);
     this.log.info(`Replaced the saved login for "${existing.alias}".`);
     const live = await this.refresh();
     if (live.kind !== 'known' || live.profile.id !== existing.id) {
-      void vscode.window.showInformationMessage(`Updated the saved login for "${existing.alias}".`);
+      void this.view.notify('success', `Updated the saved login for "${existing.alias}".`);
       return;
     }
     // The account is the active one, so Claude still holds the old tokens until they are replaced.
-    const apply = await vscode.window.showInformationMessage(
-      `"${existing.alias}" is the active account. Use the new sign-in now? This window will reload.`,
-      'Use Now',
-    );
-    if (apply === 'Use Now') {
-      await this.applyAndReload(`Applying the new sign-in for "${existing.alias}"…`, async () => {
+    const apply = await this.view.confirm({
+      title: `"${existing.alias}" is the active account`,
+      message: 'Use the new sign-in now?',
+      actions: [{ id: 'apply', label: 'Use now', style: 'primary' }],
+    });
+    if (apply === 'apply') {
+      await this.applyAndActivate(`Applying the new sign-in for "${existing.alias}"…`, async () => {
         const result = await this.engine.switchTo(existing.id, { replaceLive: true });
-        return { alias: result.profile.alias };
+        return { alias: result.profile.alias, profileId: result.profile.id };
       });
     }
   }
 
-  private async offerToSave(account: OAuthAccount): Promise<void> {
-    const identity = identityOf(account);
-    if (this.store.isDismissed(identity) || this.offered.has(identity)) {
-      return;
-    }
-    this.offered.add(identity);
-    const message =
-      this.store.list().length === 0
-        ? `Claude Switch found a Claude login (${account.emailAddress}). Save it as your first account?`
-        : `Claude is signed in as ${account.emailAddress}, which isn't saved in Claude Switch. Save it?`;
-    const choice = await vscode.window.showInformationMessage(message, 'Save…', "Don't Ask Again");
-    if (choice === "Don't Ask Again") {
-      await this.store.dismiss(identity);
-    } else if (choice === 'Save…') {
-      await this.saveCurrentLogin(account);
-    }
-  }
-
   private async saveCurrentLogin(account: OAuthAccount): Promise<ProfileMeta | undefined> {
-    const alias = await this.promptAlias(`Name for ${account.emailAddress}`, this.suggestAlias(account));
+    const first = this.store.list().length === 0;
+    const alias = await this.promptAlias(
+      first ? 'Save as your first account' : 'Save the current login',
+      `A name for ${account.emailAddress}, such as Work or Personal.`,
+      this.suggestAlias(account),
+    );
     if (!alias) {
       return undefined;
     }
     try {
       const profile = await this.engine.saveCurrent(alias, identityOf(account));
       await this.refresh();
-      void vscode.window.showInformationMessage(`Saved the current login as "${profile.alias}".`);
+      void this.view.notify('success', `Saved the current login as "${profile.alias}".`);
       return profile;
     } catch (err) {
       this.showError(err);
@@ -770,82 +957,26 @@ export class RosterController implements vscode.Disposable {
     }
   }
 
-  private async pickForSwitch(live: LiveState): Promise<ProfileMeta | PickAction | undefined> {
-    type Item = vscode.QuickPickItem & { profile?: ProfileMeta; action?: PickAction };
-    const activeId = live.kind === 'known' ? live.profile.id : undefined;
-    const items: Item[] = [];
-    if (this.reloadPending) {
-      items.push({
-        label: '$(refresh) Reload Window',
-        detail: 'The account was switched in another window. Reload so Claude Code uses it here.',
-        action: 'reload',
-      });
-    }
-    for (const profile of this.store.list()) {
-      const active = profile.id === activeId;
-      const expired = profile.status === 'needs-relogin';
-      const markers = [active ? 'Active' : undefined, expired ? 'Needs re-login' : undefined].filter(Boolean);
-      items.push({
-        label: `${active ? '$(check)' : expired ? '$(warning)' : '$(account)'} ${profile.alias}`,
-        description: profile.email,
-        detail: markers.length ? markers.join(' · ') : undefined,
-        profile,
-      });
-    }
-    items.push({ label: '', kind: vscode.QuickPickItemKind.Separator });
-    if (live.kind === 'unknown') {
-      items.push({ label: '$(save) Save Current Login…', description: live.login.account.emailAddress, action: 'save' });
-    }
-    items.push({ label: '$(add) Add Account…', description: 'Sign in to another account in your browser', action: 'add' });
-    if (live.kind === 'error') {
-      items.push({ label: '$(output) Show Log', description: live.message, action: 'log' });
-    }
-    const picked = await vscode.window.showQuickPick(items, {
-      title: 'Claude Switch',
-      placeHolder: 'Select the Claude account to use',
-      matchOnDescription: true,
-    });
-    return picked?.profile ?? picked?.action;
-  }
-
-  private async pickProfile(placeHolder: string, profiles = this.store.list()): Promise<ProfileMeta | undefined> {
+  private async pickProfile(title: string, profiles = this.store.list(), message?: string): Promise<ProfileMeta | undefined> {
     if (profiles.length === 0) {
-      void vscode.window.showInformationMessage('No accounts are saved yet. Use "Claude Switch: Add Account" first.');
+      void this.view.notify('info', 'No accounts are saved yet. Add one first.');
       return undefined;
     }
-    const picked = await vscode.window.showQuickPick(
-      profiles.map((profile) => ({ label: profile.alias, description: profile.email, profile })),
-      { title: 'Claude Switch', placeHolder, matchOnDescription: true },
-    );
-    return picked?.profile;
+    const id = await this.view.choose({
+      title,
+      message,
+      options: profiles.map((profile) => ({ id: profile.id, label: profile.alias, description: profile.email })),
+    });
+    return id ? this.store.get(id) : undefined;
   }
 
-  private async promptAlias(prompt: string, value: string, excludeId?: string): Promise<string | undefined> {
-    const taken = new Set(
-      this.store
-        .list()
-        .filter((p) => p.id !== excludeId)
-        .map((p) => p.alias.toLowerCase()),
-    );
-    const alias = await vscode.window.showInputBox({
-      title: 'Claude Switch',
-      prompt,
-      value,
-      validateInput: (input) => {
-        const trimmed = input.trim();
-        if (!trimmed) {
-          return 'Enter a name, such as Work or Personal.';
-        }
-        if (trimmed.length > MAX_ALIAS_LENGTH) {
-          return `Use at most ${MAX_ALIAS_LENGTH} characters.`;
-        }
-        if (taken.has(trimmed.toLowerCase())) {
-          return 'Another saved account already uses this name.';
-        }
-        return undefined;
-      },
-    });
-    return alias?.trim() || undefined;
+  private async promptAlias(title: string, message: string, value: string, excludeId?: string): Promise<string | undefined> {
+    const taken = this.store
+      .list()
+      .filter((p) => p.id !== excludeId)
+      .map((p) => p.alias);
+    const alias = await this.view.input({ title, message, value, placeholder: 'Work, Personal…', rule: 'alias', taken, confirmLabel: 'Save' });
+    return alias || undefined;
   }
 
   private suggestAlias(account: OAuthAccount): string {
@@ -863,8 +994,8 @@ export class RosterController implements vscode.Disposable {
   private showError(err: unknown): void {
     const message = typeof err === 'string' ? err : errorMessage(err);
     this.log.error(message);
-    void vscode.window.showErrorMessage(message, 'Show Log').then((choice) => {
-      if (choice) {
+    void this.view.notify('error', message, [{ id: 'log', label: 'Show log' }]).then((choice) => {
+      if (choice === 'log') {
         this.showLog();
       }
     });
@@ -894,5 +1025,6 @@ function resolveClaude(): { command: string; source: string } {
       return { command: binary, source: 'the Claude Code extension' };
     }
   }
-  return { command: 'claude', source: 'PATH' };
+  return { command: findOnPath('claude') ?? 'claude', source: 'PATH' };
 }
+

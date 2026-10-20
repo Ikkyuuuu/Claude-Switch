@@ -1,9 +1,10 @@
 import { ChildProcess, execFile, spawn } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { delay, errorCode, readSnapshot, resolvePaths, sameSnapshot, SavedLogin, toSavedLogin } from './claudeFiles';
 import { errorMessage, redact } from './log';
+import { isValidEmail } from './webview/rules';
 
 /**
  * Add Account runs the Claude Code CLI with CLAUDE_CONFIG_DIR pointing at a
@@ -72,15 +73,44 @@ export async function waitForLogin(dir: string, options: WaitForLoginOptions = {
   }
 }
 
-const EMAIL_PATTERN = /^[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
+export { isValidEmail };
 
-/** Conservative on purpose: the address may reach a command line. */
-export function isValidEmail(value: string): boolean {
-  return EMAIL_PATTERN.test(value);
+/** Variables that would make Claude use an API key or token instead of the claude.ai login. */
+const AUTH_OVERRIDES = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']);
+
+/**
+ * The full path of a command on PATH. On Windows, Node finds only .exe files
+ * by itself, so an npm-installed claude.cmd would not start without this.
+ * Relative PATH entries are skipped, so a project folder can never supply it.
+ */
+export function findOnPath(name: string, env: NodeJS.ProcessEnv = process.env, platform = process.platform): string | undefined {
+  const extensions = platform === 'win32' ? (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean) : [''];
+  const pathValue = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? '';
+  for (const dir of pathValue.split(path.delimiter)) {
+    const folder = dir.trim().replace(/^"(.*)"$/, '$1');
+    if (!path.isAbsolute(folder)) {
+      continue;
+    }
+    for (const extension of extensions) {
+      const candidate = path.join(folder, name + extension.toLowerCase());
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return undefined;
 }
 
-/** Variables that would make Claude use an API key or token instead of signing in. */
-const AUTH_OVERRIDES = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']);
+/** A copy of env without AUTH_OVERRIDES, matched case-insensitively as Windows does. */
+export function withoutAuthOverrides(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const copy = { ...env };
+  for (const key of Object.keys(copy)) {
+    if (AUTH_OVERRIDES.has(key.toUpperCase())) {
+      delete copy[key];
+    }
+  }
+  return copy;
+}
 const MAX_OUTPUT = 16_000;
 
 export interface ClaudeLoginOptions {
@@ -127,12 +157,7 @@ export class ClaudeLogin {
       '--claudeai',
       ...(options.email ? ['--email', options.email] : []),
     ];
-    const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env), CLAUDE_CONFIG_DIR: options.dir };
-    for (const key of Object.keys(env)) {
-      if (AUTH_OVERRIDES.has(key.toUpperCase())) {
-        delete env[key];
-      }
-    }
+    const env = withoutAuthOverrides({ ...(options.env ?? process.env), CLAUDE_CONFIG_DIR: options.dir });
     // Node only starts .cmd/.bat files (an npm-installed claude) through a shell.
     // The arguments are fixed words plus a validated email, so nothing needs escaping.
     this.viaShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(options.command);

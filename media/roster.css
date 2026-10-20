@@ -473,6 +473,21 @@ body {
   border-color: color-mix(in srgb, var(--warn) 40%, var(--card-border));
 }
 
+/* While a switch runs: dimmed, no hover, no actions. */
+.row.waiting,
+.row.waiting:hover,
+.row.waiting:focus-within {
+  background: var(--card-bg);
+  border-color: var(--card-border);
+  box-shadow: none;
+  cursor: progress;
+  opacity: 0.55;
+}
+
+.row.waiting .row-end {
+  display: none;
+}
+
 .row:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: -1px;
@@ -564,6 +579,17 @@ body {
 .avatar-5 { background: linear-gradient(135deg, #10b981, #84cc16); }
 .avatar-6 { background: linear-gradient(135deg, #f59e0b, #ef4444); }
 .avatar-7 { background: linear-gradient(135deg, #8b5cf6, #06b6d4); }
+.avatar-8 { background: linear-gradient(135deg, #64748b, #94a3b8); }
+.avatar-9 { background: linear-gradient(135deg, #e11d48, #fb7185); }
+.avatar-10 { background: linear-gradient(135deg, #0f766e, #14b8a6); }
+.avatar-11 { background: linear-gradient(135deg, #ca8a04, #facc15); }
+
+.avatar.xl {
+  width: 52px;
+  height: 52px;
+  font-size: 19px;
+  transition: background 0.15s ease;
+}
 
 .avatar.unknown {
   color: var(--muted);
@@ -1047,7 +1073,7 @@ body {
 }
 
 .tl-item.error {
-  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
 }
 
 .tl-dot {
@@ -1123,6 +1149,325 @@ body {
 .log-empty-title {
   color: var(--vscode-foreground);
   font-weight: 600;
+}
+
+/* ------------------------------------------------------------ dialogs and notices */
+
+/* Wraps the page so a dialog can make it inert without changing the layout. */
+.page {
+  display: contents;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 56px 12px 12px;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  backdrop-filter: blur(2px);
+  animation: fade 0.15s ease both;
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 380px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--brand) 45%, var(--card-border));
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 35%);
+  animation: rise 0.18s ease both;
+}
+
+.dialog-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.dialog-message {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dialog-form input {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--vscode-input-border, var(--card-border));
+  border-radius: 6px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  font: inherit;
+}
+
+.dialog-form input:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.dialog-form input::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.dialog-error {
+  min-height: 16px;
+  color: var(--danger);
+  font-size: 11.5px;
+}
+
+.dialog-error:empty {
+  min-height: 0;
+}
+
+/* Edit account: avatar preview beside the name, colour swatches below. */
+.profile-edit {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.profile-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-label {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.swatches {
+  display: grid;
+  /* Two rows of six; the swatches shrink in a narrow sidebar. */
+  grid-template-columns: repeat(6, minmax(0, 30px));
+  gap: 10px;
+  padding: 4px;
+  margin-bottom: 4px;
+}
+
+.swatch {
+  aspect-ratio: 1;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 0 0 2px var(--surface);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.swatch:hover {
+  transform: scale(1.1);
+}
+
+.swatch[aria-checked='true'] {
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 4px var(--brand);
+}
+
+.swatch:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swatch,
+  .avatar.xl {
+    transition: none;
+  }
+}
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.btn.danger {
+  color: #fff;
+  background: var(--meter-danger);
+}
+
+.btn.danger:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--meter-danger) 85%, #000);
+}
+
+.choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.choice {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  color: var(--vscode-foreground);
+  background: var(--card-bg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.choice:hover,
+.choice:focus-visible {
+  background: var(--row-hover);
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--card-border));
+  outline: none;
+}
+
+.choice-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.choice-desc {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Notices float at the bottom of the tab, newest lowest, like VS Code's own.
+ * Being fixed, they take no space, so nothing else moves when one appears.
+ */
+.toasts {
+  position: fixed;
+  right: 14px;
+  bottom: 10px;
+  left: 14px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: calc(100vh - 20px);
+  overflow-y: auto;
+}
+
+.toast {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 8px 9px 11px;
+  border: 1px solid var(--card-border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  /* Opaque, since it floats over the cards. */
+  background: color-mix(in srgb, var(--vscode-foreground) 5%, var(--surface));
+  box-shadow: 0 6px 20px rgb(0 0 0 / 28%);
+  font-size: 12px;
+  line-height: 1.45;
+  animation: rise 0.2s ease both;
+}
+
+.toast > .icon {
+  margin-top: 1px;
+}
+
+.toast-body {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.toast .icon-btn {
+  width: 20px;
+  height: 20px;
+  margin: -2px -2px 0 0;
+}
+
+.toast.info {
+  border-left-color: var(--brand);
+}
+
+.toast.info > .icon {
+  color: var(--brand);
+}
+
+.toast.success {
+  border-left-color: var(--ok);
+}
+
+.toast.success > .icon {
+  color: var(--ok);
+}
+
+.toast.warning {
+  border-left-color: var(--meter-warn);
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+}
+
+.toast.warning > .icon {
+  color: var(--warn);
+}
+
+.toast.error {
+  border-left-color: var(--meter-danger);
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+}
+
+.toast.error > .icon {
+  color: var(--danger);
+}
+
+.toast.busy {
+  align-items: center;
+  border-left-color: var(--brand);
+}
+
+.spinner.small {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 /* ------------------------------------------------------------ footer */
