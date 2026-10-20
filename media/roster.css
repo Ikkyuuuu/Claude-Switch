@@ -160,8 +160,11 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
+  /* A long email may wrap anywhere instead of pushing the card wider. */
+  overflow-wrap: anywhere;
 }
 
 .card-sub {
@@ -764,6 +767,12 @@ body {
   gap: 10px;
 }
 
+/* Lets a long email shrink to "…" instead of widening the card. */
+.signin-head > div {
+  flex: 1;
+  min-width: 0;
+}
+
 .spinner {
   flex: none;
   width: 20px;
@@ -787,9 +796,14 @@ body {
 
 .steps li {
   display: grid;
-  grid-template-columns: 20px 1fr;
+  /* minmax(0, …) lets the column shrink below its content's natural width. */
+  grid-template-columns: 20px minmax(0, 1fr);
   column-gap: 10px;
   row-gap: 6px;
+}
+
+.steps li > * {
+  min-width: 0;
 }
 
 .steps li::before {
@@ -810,6 +824,7 @@ body {
 .step-title {
   font-size: 12.5px;
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .step-actions {
@@ -818,13 +833,16 @@ body {
   gap: 6px;
 }
 
+/* The Submit button drops below the box when the panel is too narrow for both. */
 .code-form {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
 .code-form input {
-  flex: 1;
+  flex: 1 1 120px;
+  width: 100%;
   min-width: 0;
   padding: 4px 8px;
   border: 1px solid var(--vscode-input-border, var(--card-border));

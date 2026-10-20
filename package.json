@@ -2,7 +2,7 @@
   "name": "claude-switch-accounts",
   "displayName": "Claude Switch (unofficial)",
   "description": "Switch which Claude account the Claude Code extension and CLI use. Not affiliated with Anthropic.",
-  "version": "0.8.1",
+  "version": "0.8.3",
   "publisher": "wattanun42",
   "license": "MIT",
   "repository": {

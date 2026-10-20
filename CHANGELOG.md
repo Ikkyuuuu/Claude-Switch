@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.3
+
+- README: added an Install section with a screenshot of the Extensions view, and a screenshot of the sign-in card.
+
+## 0.8.2
+
+- Fixed the layout in narrow sidebars. The sign-in card's Submit button no longer sticks out of the card; it moves under the code box when there isn't room. Long email addresses are shortened or wrapped instead of widening the cards. Checked at widths from 220 to 600 pixels.
+
 ## 0.8.1
 
 - README: added a screenshot of the Claude Switch tab.

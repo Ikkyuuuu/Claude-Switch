@@ -8,6 +8,16 @@ Switch which Claude account the **Claude Code VS Code extension** uses, and with
   <img src="https://raw.githubusercontent.com/Ikkyuuuu/Claude-Switch/main/images/accounts.png" width="340" alt="The Claude Switch tab: the active account with its session and weekly usage meters, and a second account ready to switch to">
 </p>
 
+## Install
+
+Search for **Claude Switch** in the Extensions view (`Ctrl+Shift+X`) and click **Install**:
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Ikkyuuuu/Claude-Switch/main/images/install.png" width="435" alt="Claude Switch (unofficial) by Wattanun Teeratanapong in the VS Code Extensions view, with its Install button">
+</p>
+
+Or press `Ctrl+P` and run `ext install wattanun42.claude-switch-accounts`.
+
 ## Supported platforms
 
 | Platform | Status |
@@ -16,7 +26,7 @@ Switch which Claude account the **Claude Code VS Code extension** uses, and with
 | Linux, WSL, Remote SSH | Expected to work, because Claude Code keeps logins in the same files there. Less tested. |
 | macOS | Not supported. Claude Code keeps logins in the macOS Keychain, not in files. |
 
-Out of scope: the Claude desktop app, claude.ai in a browser, and usage meters.
+Out of scope: the Claude desktop app and claude.ai in a browser.
 
 ## How to use it
 
@@ -77,6 +87,10 @@ While the sign-in runs, the tab shows a sign-in card with these options:
 - **Copy link:** for a private window or another browser.
 - **Paste code:** a box for the code, if the sign-in page shows one instead of finishing on its own.
 - **Cancel.**
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Ikkyuuuu/Claude-Switch/main/images/sign-in.png" width="344" alt="The sign-in card: waiting for you to sign in, with buttons to open the sign-in page or copy its link, and a box to paste a code">
+</p>
 
 If your browser is already signed in to claude.ai as a different account, the sign-in page approves *that* account. Sign out of claude.ai first, or copy the link into a private window.
 
