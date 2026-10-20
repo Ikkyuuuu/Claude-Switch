@@ -17,7 +17,7 @@ suite('Claude Switch in VS Code', () => {
 
   suiteSetup(async () => {
     assert.ok(process.env.CLAUDE_CONFIG_DIR, 'CLAUDE_CONFIG_DIR must point at a fake folder');
-    const extension = vscode.extensions.getExtension<RosterTestApi>('your-publisher-id.claude-account-roster');
+    const extension = vscode.extensions.getExtension<RosterTestApi>('wattanun42.claude-switch-accounts');
     assert.ok(extension, 'extension is installed');
     api = (await extension.activate())!;
     assert.ok(api, 'activate() returns the test API under the test runner');

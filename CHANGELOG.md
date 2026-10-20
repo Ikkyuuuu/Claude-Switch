@@ -1,7 +1,12 @@
 # Changelog
 
+## 0.8.1
+
+- README: added a screenshot of the Claude Switch tab.
+
 ## 0.8.0
 
+- First Marketplace release, published as `wattanun42.claude-switch-accounts` under the MIT license.
 - Renamed to **Claude Switch** (unofficial). The tab, commands ("Claude Switch: Switch Account"), status bar, Output channel and messages all use the new name. Settings and saved accounts are unchanged.
 
 ## 0.7.1

@@ -4,6 +4,10 @@ Switch which Claude account the **Claude Code VS Code extension** uses, and with
 
 > **Unofficial.** This extension is not made, endorsed or supported by Anthropic. It works by swapping Claude Code's internal login files, so a Claude Code update can stop it from working. When that happens it refuses to switch instead of guessing.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Ikkyuuuu/Claude-Switch/main/images/accounts.png" width="340" alt="The Claude Switch tab: the active account with its session and weekly usage meters, and a second account ready to switch to">
+</p>
+
 ## Supported platforms
 
 | Platform | Status |
@@ -139,6 +143,10 @@ Note that `.credentials.json` can also hold sign-ins for MCP servers. Because th
 
 If `CLAUDE_CONFIG_DIR` is set, Claude Switch switches the login in that folder and warns you once, because the Claude Code VS Code extension has been reported to ignore that variable.
 
+## License
+
+MIT. See [LICENSE](LICENSE).
+
 ## Terms of service
 
 Keeping work and personal accounts apart is the usual reason to use this extension. Rotating several personal subscriptions to get around usage limits may conflict with Anthropic's terms, so read them first. This is not legal advice.
@@ -150,7 +158,7 @@ npm install
 npm run compile            # type-check, lint, bundle into dist/
 npm run test:unit          # engine tests against a fake home folder
 npm run test:integration   # runs inside VS Code 1.100.0 (downloaded to %TEMP%)
-npm run vsix               # builds claude-account-roster-<version>.vsix
+npm run vsix               # builds claude-switch-accounts-<version>.vsix
 ```
 
 - Press **F5** and choose **Run Extension (sandbox Claude folder)** to try the UI with `CLAUDE_CONFIG_DIR` pointing at a temp folder. Your real login is not touched.
@@ -202,9 +210,3 @@ test/
   unit/            runs in Node with an in-memory SecretStorage
   integration/     runs inside VS Code via @vscode/test-cli
 ```
-
-### Before publishing
-
-- Set `publisher` in `package.json` to your Marketplace publisher ID. The extension ID is `publisher.name`, and SecretStorage is keyed by it, so changing it later loses saved accounts.
-- Choose a license (see `LICENSE`). If this was built on company time, check company policy before publishing publicly.
-- Publish with Microsoft Entra ID authentication. Global Azure DevOps PATs are retired on December 1, 2026.

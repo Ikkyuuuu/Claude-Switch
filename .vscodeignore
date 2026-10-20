@@ -13,3 +13,4 @@ esbuild.js
 eslint.config.mjs
 tsconfig.json
 claude-backup-*/**
+images/**
