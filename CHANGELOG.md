@@ -4,6 +4,7 @@
 
 - **Every window shows the same usage at the same time.** Windows without the focus now show what the focused window found within a second, from memory, without reading any files.
 - **The account that replied is the one checked.** When Claude replies in another window, the window you are in checks that window's account, with its login: a conversation's project folder tells which window, and so which account, replied.
+- Windows that chose their account before this version record their project folders as soon as they start.
 - Usage checks no longer need the Claude Switch tab to be open, so the status bar's numbers stay current too. Only the focused window checks, so there are no duplicate checks.
 
 ## 0.12.0

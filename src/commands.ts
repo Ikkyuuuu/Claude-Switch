@@ -236,8 +236,10 @@ export class RosterController implements vscode.Disposable {
     }
     const defaultId = this.live.kind === 'known' ? this.live.profile.id : undefined;
     const choice = this.store.getWindowChoice(this.window.key);
-    if (choice && Date.now() - choice.at > DAY_MS) {
-      // Choices unused for 30 days expire; using one keeps it.
+    // Choices unused for 30 days expire; using one keeps it. Its project folders, which tell which
+    // account replied (see noteClaudeActivity), follow the workspace's, and were not kept before 0.13.
+    const projectsChanged = (choice?.projects ?? []).join('|') !== this.window.projects.join('|');
+    if (choice && (Date.now() - choice.at > DAY_MS || projectsChanged)) {
       void this.store.setWindowChoice(this.window.key, choice.profileId, this.window.projects).catch(() => undefined);
     }
     try {
