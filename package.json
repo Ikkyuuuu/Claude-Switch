@@ -2,7 +2,7 @@
   "name": "claude-switch-accounts",
   "displayName": "Claude Switch (unofficial)",
   "description": "Switch which Claude account the Claude Code extension and CLI use. Not affiliated with Anthropic.",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "publisher": "wattanun42",
   "license": "MIT",
   "repository": {
@@ -267,7 +267,7 @@
           "default": 60,
           "minimum": 0,
           "scope": "application",
-          "markdownDescription": "How often, in seconds, Claude Switch asks Claude Code for the current usage of this window's account while Claude is idle. A few seconds after Claude replies, in any window, it checks anyway, so the numbers follow your use; this setting catches usage elsewhere, such as on claude.ai. Checks happen while the Claude Switch tab is open and the window is focused. Claude Code's own CLI fetches the numbers, the way its Account & Usage panel does; Claude Switch never handles your token or makes the request itself. If a check fails, for example because Anthropic is limiting requests, the next one waits longer. `0` turns usage checks off; values below 10 count as 10."
+          "markdownDescription": "How often, in seconds, Claude Switch asks Claude Code for the current usage of this window's account while Claude is idle. A few seconds after Claude replies, in any window, it checks anyway, so the numbers follow your use; this setting catches usage elsewhere, such as on claude.ai. The VS Code window you are in does the checks, for the account that replied, and every window shows the result. Claude Code's own CLI fetches the numbers, the way its Account & Usage panel does; Claude Switch never handles your token or makes the request itself. If a check fails, for example because Anthropic is limiting requests, the next one waits longer. `0` turns usage checks off; values below 10 count as 10."
         },
         "claudeRoster.autoRefreshSeconds": {
           "type": "number",

@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { identityOf } from '../../src/claudeFiles';
-import { LoginFolders, startupLoginDir } from '../../src/windowAccounts';
+import { accountForProject, LoginFolders, projectFolderName, startupLoginDir } from '../../src/windowAccounts';
 import { fakeLogin, makeFakeHome, removeFakeHomes, writeLive } from '../fixtures';
 
 suite('Window accounts', () => {
@@ -66,5 +66,27 @@ suite('Window accounts', () => {
     const identities = new Map([['id-Personal', identityOf(fakeLogin('Personal').account)]]);
     const choice = { profileId: 'id-Personal', at: Date.now() };
     assert.equal(startupLoginDir({ choice, identities, paths, folders }), folders.dirOf('id-Personal'));
+  });
+});
+
+suite('Which account a conversation used', () => {
+  test("names a project's conversation folder as Claude Code does", () => {
+    assert.equal(projectFolderName('c:\\Users\\watta\\OneDrive\\เอกสาร\\Project\\Claude Roster'), 'c--Users-watta-OneDrive--------Project-Claude-Roster');
+    assert.equal(projectFolderName('C:\\work\\my-app'), 'C--work-my-app');
+    assert.equal(projectFolderName('/home/dev/side_project'), '-home-dev-side-project');
+  });
+
+  test("goes by the window's choice for that project, else the default account", () => {
+    const choices = [
+      { profileId: 'id-Personal', at: 1, projects: ['c--work-side-project'] },
+      { profileId: 'id-Other', at: 1, projects: ['C--work-other', 'C--work-shared'] },
+    ];
+    assert.equal(accountForProject('c--work-side-project', choices, 'id-Work'), 'id-Personal');
+    assert.equal(accountForProject('c--work-shared', choices, 'id-Work'), 'id-Other', 'any folder of the window, any case');
+    assert.equal(accountForProject('c--work-my-app', choices, 'id-Work'), 'id-Work');
+    assert.equal(accountForProject('c--work-my-app', choices, undefined), undefined);
+    // Very long names may be shortened by Claude Code.
+    const long = 'c--' + 'x'.repeat(240);
+    assert.equal(accountForProject(long.slice(0, 200) + '-1a2b3c', [{ profileId: 'id-Long', at: 1, projects: [long] }], 'id-Work'), 'id-Long');
   });
 });

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.0
+
+- **Every window shows the same usage at the same time.** Windows without the focus now show what the focused window found within a second, from memory, without reading any files.
+- **The account that replied is the one checked.** When Claude replies in another window, the window you are in checks that window's account, with its login: a conversation's project folder tells which window, and so which account, replied.
+- Usage checks no longer need the Claude Switch tab to be open, so the status bar's numbers stay current too. Only the focused window checks, so there are no duplicate checks.
+
 ## 0.12.0
 
 - **Usage follows your use.** Claude Switch checks usage a few seconds after Claude replies, in any window, instead of on a fixed timer: once a reply has finished, or every 10 seconds during a long one, and never two checks within 5 seconds. It notices replies by watching for changes to Claude Code's conversation files under `~/.claude/projects`, without reading them.

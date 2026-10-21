@@ -11,7 +11,7 @@ import { RosterLog } from './rosterLog';
 import { RosterStatusBar } from './statusBar';
 import { LiveState, LockBusyError, SwitchEngine } from './switchEngine';
 import { askClaudeForUsage, forgetSavedUsage, UsageCheckOptions, usageCheckDue } from './usageCheck';
-import { LOGIN_DIR_VARIABLE, LoginFolders } from './windowAccounts';
+import { accountForProject, LOGIN_DIR_VARIABLE, LoginFolders } from './windowAccounts';
 import { MAX_ALIAS_LENGTH } from './webview/rules';
 import { colourOf } from './viewModel';
 import { SwitchSignal, WindowSync } from './windowSync';
@@ -30,6 +30,8 @@ export interface WindowContext {
   enabled: boolean;
   /** Identifies this window's workspace across reloads. */
   key: string;
+  /** The window's project folders, as Claude Code names their conversation folders. */
+  projects: string[];
   folders: LoginFolders;
   /** The folder of the default login: ~/.claude, or CLAUDE_CONFIG_DIR. */
   defaultLoginDir: string;
@@ -129,13 +131,13 @@ export class RosterController implements vscode.Disposable {
   /** From the first question of Add Account until the new account is saved. */
   private addingAccount = false;
   private usageCheck: Promise<void> | undefined;
-  private lastUsageCheck = 0;
+  /** When each account's usage was last checked, from this window. */
+  private lastChecked = new Map<string, number>();
   /** Failed usage checks in a row, and when to try again: Anthropic may be limiting requests. */
   private usageFailures = 0;
   private usageRetryAt = 0;
-  /** When Claude was first used since the last usage check (0: not since), and last used. */
-  private activitySince = 0;
-  private lastActivity = 0;
+  /** Accounts Claude was used with since their last usage check, in any window: when first, and last. */
+  private pendingUsage = new Map<string, { since: number; last: number }>();
 
   // Integration tests replace these three, since the test window must not reload or restart.
   reloadWindow: () => Thenable<unknown> = () => vscode.commands.executeCommand('workbench.action.reloadWindow');
@@ -145,6 +147,8 @@ export class RosterController implements vscode.Disposable {
 
   /** Integration tests replace this to sign in with a fake CLI. */
   createLogin: (options: ClaudeLoginOptions) => ClaudeLogin = (options) => new ClaudeLogin(options);
+  /** Integration tests replace this, since the test window may not have the focus. */
+  windowFocused: () => boolean = () => vscode.window.state.focused;
   /** Integration tests replace this, since the test window's fake login must never reach Anthropic. */
   askUsage: (options: UsageCheckOptions) => Promise<unknown> = askClaudeForUsage;
 
@@ -234,7 +238,7 @@ export class RosterController implements vscode.Disposable {
     const choice = this.store.getWindowChoice(this.window.key);
     if (choice && Date.now() - choice.at > DAY_MS) {
       // Choices unused for 30 days expire; using one keeps it.
-      void this.store.setWindowChoice(this.window.key, choice.profileId).catch(() => undefined);
+      void this.store.setWindowChoice(this.window.key, choice.profileId, this.window.projects).catch(() => undefined);
     }
     try {
       await this.engine.reconcileFolders(this.window.folders, defaultId, this.store.chosenAccounts());
@@ -347,65 +351,99 @@ export class RosterController implements vscode.Disposable {
     }
     this.autoRefreshTimer = setInterval(
       () => {
-        if (vscode.window.state.focused) {
+        if (this.windowFocused()) {
           void this.refresh().then(() => this.checkUsageIfDue());
+        } else {
+          this.renderFromStore();
         }
       },
       Math.max(1, seconds) * 1000,
     );
   }
 
-  /** Claude was just used, in some window: its usage numbers are about to change. See ClaudeActivity. */
-  noteClaudeActivity(): void {
-    const now = Date.now();
-    this.activitySince ||= now;
-    this.lastActivity = now;
+  /**
+   * In a window without the focus: shows what other windows saved, such as
+   * the usage numbers the focused window just got, so every window shows the
+   * same at the same time. Reads nothing from disk.
+   */
+  private renderFromStore(): void {
+    if (this.windowLive.kind === 'known') {
+      const profile = this.store.get(this.windowLive.profile.id);
+      if (profile) {
+        this.windowLive = { ...this.windowLive, profile };
+      }
+    }
+    this.render();
   }
 
   /**
-   * Claude Code saves usage to .claude.json only now and then, so while the
-   * tab shows and the window is focused, ask Claude for the current numbers:
-   * shortly after it replies, and every claudeRoster.usageCheckSeconds otherwise.
+   * Claude was just used, in some window: that account's usage is about to
+   * change. project is the conversation's project folder, which tells the
+   * window, and so the account. See ClaudeActivity.
+   */
+  noteClaudeActivity(project?: string): void {
+    const defaultId = this.live.kind === 'known' ? this.live.profile.id : undefined;
+    const id = project ? accountForProject(project, this.store.windowChoices(), defaultId) : this.windowAccountId();
+    if (!id) {
+      return;
+    }
+    const now = Date.now();
+    this.pendingUsage.set(id, { since: this.pendingUsage.get(id)?.since ?? now, last: now });
+  }
+
+  /**
+   * Claude Code saves usage to .claude.json only now and then, so the focused
+   * window asks Claude for the current numbers: of the account just used, in
+   * any window, shortly after Claude replies; and of this window's account
+   * every claudeRoster.usageCheckSeconds otherwise. Only the focused window
+   * checks, and the others show what it found (see renderFromStore).
    */
   checkUsageIfDue(): void {
     const seconds = usageCheckSeconds();
     const now = Date.now();
-    if (
-      seconds &&
-      !this.usageCheck &&
-      this.windowLive.kind === 'known' &&
-      this.view.visible &&
-      vscode.window.state.focused &&
-      now >= this.usageRetryAt &&
-      usageCheckDue({
+    if (!seconds || this.usageCheck || !this.windowFocused() || now < this.usageRetryAt) {
+      return;
+    }
+    const own = this.windowAccountId();
+    for (const id of new Set([...this.pendingUsage.keys(), ...(own ? [own] : [])])) {
+      const pending = this.pendingUsage.get(id);
+      const due = usageCheckDue({
         now,
-        lastCheck: this.lastUsageCheck,
-        intervalMs: seconds * 1000,
-        activitySince: this.activitySince,
-        lastActivity: this.lastActivity,
-      })
-    ) {
-      void this.checkUsage();
+        lastCheck: this.lastChecked.get(id) ?? 0,
+        intervalMs: id === own ? seconds * 1000 : Number.POSITIVE_INFINITY,
+        activitySince: pending?.since ?? 0,
+        lastActivity: pending?.last ?? 0,
+      });
+      if (due) {
+        void this.checkUsage(id);
+        return;
+      }
     }
   }
 
-  /** Asks Claude Code's CLI for the usage of this window's account now. See usageCheck.ts. */
-  checkUsage(): Promise<void> {
-    this.usageCheck ??= this.runUsageCheck().finally(() => {
+  /** Asks Claude Code's CLI for an account's usage now, this window's by default. See usageCheck.ts. */
+  checkUsage(profileId = this.windowAccountId()): Promise<void> {
+    this.usageCheck ??= this.runUsageCheck(profileId).finally(() => {
       this.usageCheck = undefined;
     });
     return this.usageCheck;
   }
 
-  private async runUsageCheck(): Promise<void> {
-    this.lastUsageCheck = Date.now();
-    // This check covers what Claude did until now.
-    this.activitySince = 0;
-    if (this.windowLive.kind !== 'known') {
+  private async runUsageCheck(profileId: string | undefined): Promise<void> {
+    if (!profileId) {
       return;
     }
-    const profileId = this.windowLive.profile.id;
-    const folderId = this.windowFolderId;
+    this.lastChecked.set(profileId, Date.now());
+    // This check covers what Claude did until now.
+    const pending = this.pendingUsage.get(profileId);
+    this.pendingUsage.delete(profileId);
+    // Its login is where its Claude reads it: ~/.claude for the default account, else its folder.
+    const defaultId = this.live.kind === 'known' ? this.live.profile.id : undefined;
+    const folderId = profileId === defaultId ? undefined : profileId;
+    if (folderId && !this.window.folders.has(folderId)) {
+      // Not the default account, and no window uses it: its usage can't be changing here.
+      return;
+    }
     const claude = resolveClaude();
     try {
       // A settings folder of its own per account: Claude's usage cache in ~/.claude.json is
@@ -426,8 +464,11 @@ export class RosterController implements vscode.Disposable {
         await this.refresh();
       }
     } catch (err) {
-      // Busy: a switch is running, in this window or another. Try again next time.
+      // Busy: a switch is running, in this window or another. Try again shortly.
       if (err instanceof LockBusyError) {
+        if (pending) {
+          this.pendingUsage.set(profileId, pending);
+        }
         return;
       }
       this.usageFailures++;
@@ -516,7 +557,7 @@ export class RosterController implements vscode.Disposable {
     const defaultId = live.kind === 'known' ? live.profile.id : undefined;
     try {
       await this.view.busy(`Switching this window to "${profile.alias}"…`, async () => {
-        await this.store.setWindowChoice(this.window.key, profile.id);
+        await this.store.setWindowChoice(this.window.key, profile.id, this.window.projects);
         // Gives the account its own login folder, unless it is the default account.
         await this.engine.reconcileFolders(this.window.folders, defaultId, this.store.chosenAccounts(), false);
         if (profile.id !== defaultId && !this.window.folders.has(profile.id)) {

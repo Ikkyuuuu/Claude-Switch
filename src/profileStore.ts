@@ -192,13 +192,22 @@ export class ProfileStore {
     return choice && now - choice.at < WINDOW_CHOICE_TTL_MS && this.get(choice.profileId) ? choice : undefined;
   }
 
-  /** Records the account a window uses; undefined goes back to the default account. Also drops expired choices. */
-  async setWindowChoice(windowKey: string, profileId: string | undefined): Promise<void> {
+  /**
+   * Records the account a window uses, and its project folders (see
+   * projectFolderName); undefined goes back to the default account. Also drops expired choices.
+   */
+  async setWindowChoice(windowKey: string, profileId: string | undefined, projects: string[] = []): Promise<void> {
     const now = Date.now();
     await this.mutate<Record<string, WindowChoice>>(WINDOWS_KEY, (choices = {}) => {
       const kept = Object.entries(choices).filter(([key, choice]) => key !== windowKey && now - choice.at < WINDOW_CHOICE_TTL_MS);
-      return Object.fromEntries(profileId ? [...kept, [windowKey, { profileId, at: now }]] : kept);
+      return Object.fromEntries(profileId ? [...kept, [windowKey, { profileId, at: now, projects }]] : kept);
     });
+  }
+
+  /** Every window's choice that has not expired, for accounts still saved. */
+  windowChoices(now = Date.now()): WindowChoice[] {
+    const choices = Object.values(this.read<Record<string, WindowChoice>>(WINDOWS_KEY) ?? {});
+    return choices.filter((c) => now - c.at < WINDOW_CHOICE_TTL_MS && this.get(c.profileId));
   }
 
   /** Accounts that some window chose, within WINDOW_CHOICE_TTL_MS. */

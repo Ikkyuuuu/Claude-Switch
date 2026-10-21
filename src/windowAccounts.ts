@@ -80,7 +80,34 @@ export interface WindowChoice {
   profileId: string;
   /** When the window last used it, epoch ms. */
   at: number;
+  /** The window's project folders, as Claude Code names their conversation folders. See projectFolderName(). */
+  projects?: string[];
 }
+
+/**
+ * The folder, under <config>/projects, where Claude Code keeps the
+ * conversations of a project: its path with every character but letters and
+ * digits made "-". For example C:\work\my-app becomes C--work-my-app.
+ */
+export function projectFolderName(folderPath: string): string {
+  return folderPath.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/**
+ * The account a conversation used, from its project folder: the account the
+ * window on that project chose, else the default account.
+ */
+export function accountForProject(project: string, choices: WindowChoice[], defaultId: string | undefined): string | undefined {
+  const name = project.toLowerCase();
+  // Claude Code may shorten very long names; compare their start.
+  const same = (known: string) => {
+    const other = known.toLowerCase();
+    return other === name || (other.length >= LONG_PROJECT_NAME && name.startsWith(other.slice(0, LONG_PROJECT_NAME)));
+  };
+  return choices.find((choice) => choice.projects?.some(same))?.profileId ?? defaultId;
+}
+
+const LONG_PROJECT_NAME = 200;
 
 /**
  * Decides, before Claude Code starts anything, which login folder this window

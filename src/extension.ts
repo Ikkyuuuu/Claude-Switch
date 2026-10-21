@@ -10,7 +10,7 @@ import { RosterLog } from './rosterLog';
 import { RosterStatusBar } from './statusBar';
 import { SwitchEngine } from './switchEngine';
 import type { WebviewMessage } from './webview/protocol';
-import { LOGIN_DIR_VARIABLE, LoginFolders, startupLoginDir } from './windowAccounts';
+import { LOGIN_DIR_VARIABLE, LoginFolders, projectFolderName, startupLoginDir } from './windowAccounts';
 import { WindowSync } from './windowSync';
 
 /** Returned from activate() under the test runner only. */
@@ -174,7 +174,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Roster
   );
 
   // Usage is checked shortly after Claude replies, in any window.
-  const activity = new ClaudeActivity(paths.configDir, () => controller.noteClaudeActivity());
+  const activity = new ClaudeActivity(paths.configDir, (project) => controller.noteClaudeActivity(project));
   activity.start();
   context.subscriptions.push(activity);
 
@@ -242,6 +242,7 @@ function windowContext(context: vscode.ExtensionContext, store: ProfileStore, pa
   const window: WindowContext = {
     enabled,
     key,
+    projects: (vscode.workspace.workspaceFolders ?? []).map((folder) => projectFolderName(folder.uri.fsPath)),
     folders,
     defaultLoginDir: path.dirname(paths.credentialsFile),
     get loginDir() {

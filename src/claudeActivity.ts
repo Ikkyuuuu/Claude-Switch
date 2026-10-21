@@ -14,7 +14,8 @@ export class ClaudeActivity {
   constructor(
     /** Claude's config folder: ~/.claude, or CLAUDE_CONFIG_DIR. */
     private readonly configDir: string,
-    private readonly onActivity: () => void,
+    /** project: the conversation's project folder, under <config folder>/projects. */
+    private readonly onActivity: (project: string) => void,
     private readonly retryMs = 60_000,
   ) {}
 
@@ -25,7 +26,7 @@ export class ClaudeActivity {
     try {
       this.watcher = watch(this.configDir, { recursive: true, persistent: false }, (_event, file) => {
         if (file && isConversationFile(String(file))) {
-          this.onActivity();
+          this.onActivity(String(file).split(/[\\/]/)[1]);
         }
       });
       this.watcher.on('error', () => this.startLater());

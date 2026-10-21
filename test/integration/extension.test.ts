@@ -254,9 +254,9 @@ suite('Claude Switch in VS Code', () => {
   test('notices Claude replying, to check usage right after', async () => {
     let noticed = 0;
     const note = api.controller.noteClaudeActivity.bind(api.controller);
-    api.controller.noteClaudeActivity = () => {
+    api.controller.noteClaudeActivity = (project) => {
       noticed++;
-      note();
+      note(project);
     };
     try {
       // What Claude Code does for each message of a conversation.
@@ -266,6 +266,46 @@ suite('Claude Switch in VS Code', () => {
       await waitFor(async () => (noticed > 0 ? true : undefined), 10_000);
     } finally {
       api.controller.noteClaudeActivity = note;
+    }
+  });
+
+  test('checks the account a reply in another window used', async () => {
+    const { personal } = profiles();
+    // Another window, on a project of its own, uses Personal.
+    await api.store.setWindowChoice('another-window', personal.id, ['c--work-side-project']);
+    await api.controller.refresh();
+    assert.ok(api.window.folders.has(personal.id), 'Personal has its login folder');
+    const focused = api.controller.windowFocused;
+    api.controller.windowFocused = () => true;
+    usageReply = { five_hour: { utilization: 55 }, seven_day: { utilization: 22 } };
+    const before = usageAsks.length;
+    try {
+      // Claude replies in that window.
+      const project = path.join(api.paths.configDir, 'projects', 'c--work-side-project');
+      await fs.mkdir(project, { recursive: true });
+      await fs.appendFile(path.join(project, 'b2c3.jsonl'), '{"type":"assistant"}\n');
+      // Within a few seconds, this focused window checks Personal's usage, with Personal's login.
+      await waitFor(
+        async () => (usageAsks.slice(before).some((a) => a.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR === api.window.folders.dirOf(personal.id)) ? true : undefined),
+        15_000,
+      );
+      await waitFor(async () => (api.store.get(personal.id)?.usage?.session?.percent === 55 ? true : undefined));
+    } finally {
+      api.controller.windowFocused = focused;
+      await api.store.setWindowChoice('another-window', undefined);
+    }
+  });
+
+  test('shows the numbers another window got, even without the focus', async () => {
+    const { work } = profiles();
+    const focused = api.controller.windowFocused;
+    api.controller.windowFocused = () => false;
+    try {
+      // What another window's usage check saves.
+      await api.store.setDetails(work.id, { usage: { fetchedAt: Date.now(), session: { percent: 33 }, weekly: { percent: 44 } } });
+      await waitFor(async () => (activeCard()?.usage?.meters.find((m) => m.key === 'session')?.percent === 33 ? true : undefined), 5_000);
+    } finally {
+      api.controller.windowFocused = focused;
     }
   });
 

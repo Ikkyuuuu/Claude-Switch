@@ -19,7 +19,11 @@ suite('Claude activity', () => {
     const project = path.join(dir, 'projects', 'c--work-my-app');
     await fs.mkdir(project, { recursive: true });
     let seen = 0;
-    const activity = new ClaudeActivity(dir, () => seen++);
+    const projects = new Set<string>();
+    const activity = new ClaudeActivity(dir, (project) => {
+      seen++;
+      projects.add(project);
+    });
     activity.start();
     try {
       await fs.writeFile(path.join(dir, 'settings.json'), '{}');
@@ -33,6 +37,7 @@ suite('Claude activity', () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       assert.ok(seen > 0, 'a conversation file changed');
+      assert.deepEqual([...projects], ['c--work-my-app'], 'with its project folder');
     } finally {
       activity.dispose();
       await fs.rm(dir, { recursive: true, force: true });
