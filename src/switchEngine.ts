@@ -82,6 +82,9 @@ const LOCK_STALE_MS = 2 * 60_000;
 const FOLDER_IDLE_MS = 24 * 60 * 60_000;
 const LOCK_WAIT_MS = 20_000;
 const LOCK_RETRY_MS = 150;
+/** What Windows reports while another window deletes the lock file. See openExclusive(). */
+const BUSY_OPEN_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const OPEN_ATTEMPTS = 5;
 const LAST_SWITCH_WINDOW_MS = 10 * 60_000;
 const STABLE_READ_ATTEMPTS = 4;
 
@@ -692,7 +695,7 @@ async function tryLock(file: string, staleMs: number): Promise<() => Promise<voi
   await fs.mkdir(path.dirname(file), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const handle = await fs.open(file, 'wx');
+      const handle = await openExclusive(file);
       // The pid tells other windows whether the holder still runs; the random part tells this lock from a later one.
       const owner = `${process.pid} ${new Date().toISOString()} ${randomBytes(8).toString('hex')}`;
       try {
@@ -714,16 +717,41 @@ async function tryLock(file: string, staleMs: number): Promise<() => Promise<voi
         throw err;
       }
       const stat = await fs.stat(file).catch(() => undefined);
+      const theirs = await readTextIfExists(file).catch(() => undefined);
+      if (!stat || theirs === undefined) {
+        // Released meanwhile. Deleting the file now could delete the lock another window has just taken.
+        continue;
+      }
       // A window that reloaded or crashed while holding the lock leaves it behind; its process is gone.
-      const holder = Number.parseInt((await readTextIfExists(file).catch(() => undefined)) ?? '', 10);
+      const holder = Number.parseInt(theirs, 10);
       const holderGone = Number.isInteger(holder) && holder !== process.pid && !isRunning(holder);
-      if (stat && Date.now() - stat.mtimeMs < staleMs && !holderGone) {
+      if (Date.now() - stat.mtimeMs < staleMs && !holderGone) {
         throw new LockBusyError();
       }
-      await fs.rm(file, { force: true });
+      // Abandoned, unless another window took it over since.
+      if ((await readTextIfExists(file).catch(() => undefined)) === theirs) {
+        await fs.rm(file, { force: true });
+      }
     }
   }
   throw new LockBusyError();
+}
+
+/**
+ * Creates the lock file, failing with EEXIST if it exists. Windows reports
+ * EPERM for a moment while another window deletes it, so that is retried.
+ */
+async function openExclusive(file: string): Promise<fs.FileHandle> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fs.open(file, 'wx');
+    } catch (err) {
+      if (!BUSY_OPEN_CODES.has(errorCode(err)) || attempt >= OPEN_ATTEMPTS) {
+        throw err;
+      }
+      await delay(attempt * 20);
+    }
+  }
 }
 
 function isRunning(pid: number): boolean {

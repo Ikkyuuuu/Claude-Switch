@@ -30,8 +30,8 @@ export interface WindowContext {
   enabled: boolean;
   /** Identifies this window's workspace across reloads. */
   key: string;
-  /** The window's project folders, as Claude Code names their conversation folders. */
-  projects: string[];
+  /** The window's project folders, as Claude Code names their conversation folders. Follows folders added later. */
+  readonly projects: string[];
   folders: LoginFolders;
   /** The folder of the default login: ~/.claude, or CLAUDE_CONFIG_DIR. */
   defaultLoginDir: string;
@@ -461,6 +461,7 @@ export class SwitchController implements vscode.Disposable {
     if (!profileId) {
       return;
     }
+    const lastChecked = this.lastChecked.get(profileId);
     this.lastChecked.set(profileId, Date.now());
     // This check covers what Claude did until now.
     const pending = this.pendingUsage.get(profileId);
@@ -492,10 +493,15 @@ export class SwitchController implements vscode.Disposable {
         await this.refresh();
       }
     } catch (err) {
-      // Busy: a switch is running, in this window or another. Try again shortly.
+      // Busy: a switch is running, in this window or another. Try again shortly, not an interval later.
       if (err instanceof LockBusyError) {
         if (pending) {
           this.pendingUsage.set(profileId, pending);
+        }
+        if (lastChecked === undefined) {
+          this.lastChecked.delete(profileId);
+        } else {
+          this.lastChecked.set(profileId, lastChecked);
         }
         return;
       }
@@ -526,6 +532,8 @@ export class SwitchController implements vscode.Disposable {
       return;
     }
     this.switching = true;
+    // The list dims at once, so the click visibly landed even before anything slow.
+    this.render();
     try {
       if (args.allWindows || !this.window.enabled) {
         await this.switchToProfile(args.profileId, args.skipConfirm);
@@ -552,22 +560,19 @@ export class SwitchController implements vscode.Disposable {
    * the previous login, in its own place, so nothing is written back.
    */
   private async switchWindow(profileId: string, skipConfirmInTests?: boolean): Promise<void> {
-    const live = await this.refresh();
-    const profile = this.store.get(profileId);
-    if (!profile) {
-      void this.view.notify('error', 'That account is no longer saved in Claude Switch.');
+    // Re-reading the login takes up to a second, so it runs in the background while the user answers, and the
+    // question appears at once, going by what the tab shows. Only a refusal waits for the read, so it never comes
+    // from what the tab showed; a yes is checked against it before anything changes.
+    const checked = this.refresh();
+    let asked = this.windowSwitchTarget(profileId, false);
+    if (!asked) {
+      await checked;
+      asked = this.windowSwitchTarget(profileId, true);
+    }
+    if (!asked) {
       return;
     }
-    if (live.kind === 'error') {
-      // Which account is the default decides which accounts get a login folder: guessing could put one login in two places.
-      this.showError(live.message);
-      return;
-    }
-    if (this.windowLive.kind === 'known' && this.windowLive.profile.id === profile.id) {
-      void this.view.notify('info', `This window already uses "${profile.alias}".`);
-      return;
-    }
-    if (profile.status === 'needs-relogin' && !(await this.switchExpiredAnyway(profile))) {
+    if (asked.status === 'needs-relogin' && !(await this.switchExpiredAnyway(asked))) {
       return;
     }
     const mode = switchMode();
@@ -578,7 +583,7 @@ export class SwitchController implements vscode.Disposable {
       vscode.workspace.getConfiguration('claudeSwitch').get<boolean>('confirmBeforeSwitch', true)
     ) {
       const choice = await this.view.confirm({
-        title: `Switch this window to "${profile.alias}"?`,
+        title: `Switch this window to "${asked.alias}"?`,
         message: WINDOW_RESTART_DETAIL[mode],
         actions: [{ id: 'switch', label: mode === 'reloadWindow' ? 'Switch and reload' : 'Switch and restart', style: 'primary' }],
       });
@@ -587,7 +592,14 @@ export class SwitchController implements vscode.Disposable {
       }
     }
 
-    const defaultId = live.kind === 'known' ? live.profile.id : undefined;
+    // Again, against the files: by now the read that started with the click has usually finished, or auto-refresh
+    // has read them since. Under the switch lock, reconcileFolders reads the default login once more anyway.
+    await checked;
+    const profile = this.windowSwitchTarget(profileId, true);
+    if (!profile) {
+      return;
+    }
+    const defaultId = this.live.kind === 'known' ? this.live.profile.id : undefined;
     try {
       await this.view.busy(`Switching this window to "${profile.alias}"…`, async () => {
         await this.store.setWindowChoice(this.window.key, profile.id, this.window.projects);
@@ -628,6 +640,34 @@ export class SwitchController implements vscode.Disposable {
           void this.openConversation();
         }
       });
+  }
+
+  /**
+   * The account to switch this window to, going by the last refresh; undefined when this window can't switch to
+   * it, and then, with report, the user is told why.
+   */
+  private windowSwitchTarget(profileId: string, report: boolean): ProfileMeta | undefined {
+    const profile = this.store.get(profileId);
+    if (!profile) {
+      if (report) {
+        void this.view.notify('error', 'That account is no longer saved in Claude Switch.');
+      }
+      return undefined;
+    }
+    if (this.live.kind === 'error') {
+      // Which account is the default decides which accounts get a login folder: guessing could put one login in two places.
+      if (report) {
+        this.showError(this.live.message);
+      }
+      return undefined;
+    }
+    if (this.windowLive.kind === 'known' && this.windowLive.profile.id === profile.id) {
+      if (report) {
+        void this.view.notify('info', `This window already uses "${profile.alias}".`);
+      }
+      return undefined;
+    }
+    return profile;
   }
 
   /** For an account whose saved login expired: offers to sign in again. True means switch anyway. */
@@ -913,8 +953,8 @@ export class SwitchController implements vscode.Disposable {
       this.showError(err);
       return;
     }
-    this.live = live;
-    this.render();
+    // Also brings this window's card and the status bar up to date, not only the default login.
+    await this.refresh();
     switch (live.kind) {
       case 'known':
         void this.view.notify('success', `Saved the current login into "${live.profile.alias}".`);
@@ -1474,7 +1514,9 @@ function resolveClaude(): { command: string; source: string } {
   // Machine-scoped, so a workspace's settings can never choose what runs here.
   const configured = vscode.workspace.getConfiguration('claudeSwitch').get<string>('claudePath')?.trim();
   if (configured) {
-    return { command: configured, source: 'the claudeSwitch.claudePath setting' };
+    // A bare name such as `claude` is looked up on PATH as a terminal would, so an npm-installed claude.cmd starts too.
+    const bare = path.basename(configured) === configured;
+    return { command: (bare && findOnPath(configured)) || configured, source: 'the claudeSwitch.claudePath setting' };
   }
   const claudeExtension = vscode.extensions.getExtension('anthropic.claude-code');
   if (claudeExtension) {

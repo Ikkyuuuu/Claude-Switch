@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.14.2
+
+- The Marketplace lists the extension as **Claude Switch - Account per Window**: another extension already has the name Claude Switch. Inside VS Code it is still called Claude Switch.
+- Fixed: clicking the **Switch** label that appears on an account when you point at it did nothing, nor did clicking just left of it, so it took a second click elsewhere on the account to switch. The whole account now switches, apart from its Edit and Remove buttons.
+- The question before switching this window now appears as soon as you click, instead of up to a second later, and the account list dims at once to show the click landed. Claude's login files are checked in the background while you read it, so **Switch and reload** doesn't wait for them either. Nothing changes unless that check passes.
+- Fixed: two windows could hold the switch lock at once. When the lock was released at the moment another window found it taken, that window deleted the lock a third window had just taken, so a switch could run alongside a usage check, folder update or another switch.
+- Fixed: on Windows, a switch could fail with "EPERM: operation not permitted" when another window was releasing the switch lock at that moment. It now waits its turn. Usage checks and refreshes no longer log this error or slow down because of it.
+- Fixed: a usage check that found a switch running waited a full `claudeSwitch.usageCheckSeconds` before trying again. It now tries again within seconds.
+- Fixed: **Re-capture Current Login** did not update this window's card and the status bar until the next refresh, or at all with `claudeSwitch.autoRefreshSeconds` at `0`.
+- Fixed: a folder added to the workspace while the window was open did not count as this window's. Claude replying in it was taken for the default account, and the wrong account's usage was checked.
+- Fixed: typing in a box in the tab, the caret jumped to the end whenever the tab updated, for example when a usage check finished.
+- Fixed: a sign-in code typed but not submitted came back in the next **Add Account**.
+- Fixed: `claudeSwitch.claudePath` set to a bare name such as `claude` did not find an npm-installed Claude Code CLI on Windows. Bare names are now looked up on PATH.
+
+## 0.14.1
+
+- The Marketplace lists the extension as just **Claude Switch**. Its description still says it is not affiliated with Anthropic.
+
 ## 0.14.0
 
 - **One name everywhere.** Settings, commands and the tab now go by Claude Switch inside too, under `claudeSwitch.*`, as do the files Claude Switch makes. Nothing to do on your part:

@@ -566,8 +566,13 @@ body {
 .row:hover .row-end,
 .row:focus-within .row-end {
   opacity: 1;
-  pointer-events: auto;
   transform: none;
+}
+
+/* Only Edit and Remove take clicks; anywhere else, the Switch label included, the click goes to the row. */
+.row:hover .row-end .icon-btn,
+.row:focus-within .row-end .icon-btn {
+  pointer-events: auto;
 }
 
 .row .go {
