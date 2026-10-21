@@ -267,7 +267,10 @@ function windowContext(context: vscode.ExtensionContext, store: ProfileStore, pa
   const window: WindowContext = {
     enabled,
     key,
-    projects: (vscode.workspace.workspaceFolders ?? []).map((folder) => projectFolderName(folder.uri.fsPath)),
+    // Read each time: folders can be added to the workspace while the window is open.
+    get projects() {
+      return (vscode.workspace.workspaceFolders ?? []).map((folder) => projectFolderName(folder.uri.fsPath));
+    },
     folders,
     defaultLoginDir: path.dirname(paths.credentialsFile),
     get loginDir() {

@@ -236,7 +236,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "Path to the Claude Code CLI that Claude Switch runs: to sign in with **Add Account**, and for usage checks. Leave empty to use the CLI bundled with the Claude Code extension, or `claude` on PATH. User settings only; workspace settings cannot change it."
+          "markdownDescription": "Path to the Claude Code CLI that Claude Switch runs: to sign in with **Add Account**, and for usage checks. A bare name such as `claude` is looked up on PATH. Leave empty to use the CLI bundled with the Claude Code extension, or `claude` on PATH. User settings only; workspace settings cannot change it."
         },
         "claudeSwitch.confirmBeforeSwitch": {
           "type": "boolean",

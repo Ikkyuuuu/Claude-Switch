@@ -30,8 +30,8 @@ export interface WindowContext {
   enabled: boolean;
   /** Identifies this window's workspace across reloads. */
   key: string;
-  /** The window's project folders, as Claude Code names their conversation folders. */
-  projects: string[];
+  /** The window's project folders, as Claude Code names their conversation folders. Follows folders added later. */
+  readonly projects: string[];
   folders: LoginFolders;
   /** The folder of the default login: ~/.claude, or CLAUDE_CONFIG_DIR. */
   defaultLoginDir: string;
@@ -461,6 +461,7 @@ export class SwitchController implements vscode.Disposable {
     if (!profileId) {
       return;
     }
+    const lastChecked = this.lastChecked.get(profileId);
     this.lastChecked.set(profileId, Date.now());
     // This check covers what Claude did until now.
     const pending = this.pendingUsage.get(profileId);
@@ -492,10 +493,15 @@ export class SwitchController implements vscode.Disposable {
         await this.refresh();
       }
     } catch (err) {
-      // Busy: a switch is running, in this window or another. Try again shortly.
+      // Busy: a switch is running, in this window or another. Try again shortly, not an interval later.
       if (err instanceof LockBusyError) {
         if (pending) {
           this.pendingUsage.set(profileId, pending);
+        }
+        if (lastChecked === undefined) {
+          this.lastChecked.delete(profileId);
+        } else {
+          this.lastChecked.set(profileId, lastChecked);
         }
         return;
       }
@@ -913,8 +919,8 @@ export class SwitchController implements vscode.Disposable {
       this.showError(err);
       return;
     }
-    this.live = live;
-    this.render();
+    // Also brings this window's card and the status bar up to date, not only the default login.
+    await this.refresh();
     switch (live.kind) {
       case 'known':
         void this.view.notify('success', `Saved the current login into "${live.profile.alias}".`);
@@ -1474,7 +1480,9 @@ function resolveClaude(): { command: string; source: string } {
   // Machine-scoped, so a workspace's settings can never choose what runs here.
   const configured = vscode.workspace.getConfiguration('claudeSwitch').get<string>('claudePath')?.trim();
   if (configured) {
-    return { command: configured, source: 'the claudeSwitch.claudePath setting' };
+    // A bare name such as `claude` is looked up on PATH as a terminal would, so an npm-installed claude.cmd starts too.
+    const bare = path.basename(configured) === configured;
+    return { command: (bare && findOnPath(configured)) || configured, source: 'the claudeSwitch.claudePath setting' };
   }
   const claudeExtension = vscode.extensions.getExtension('anthropic.claude-code');
   if (claudeExtension) {

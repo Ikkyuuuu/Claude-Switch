@@ -478,4 +478,22 @@ suite('SwitchEngine', () => {
     await fs.writeFile(lockFile, `${process.ppid} ${new Date().toISOString()}`);
     await assert.rejects(engine.switchTo(personal.id), LockBusyError);
   });
+
+  test('never lets two windows hold the lock, however often it changes hands', async () => {
+    const lockFile = path.join(home, 'storage', 'switch.lock');
+    let holders = 0;
+    let overlaps = 0;
+    // Any error fails the test too, such as the EPERM Windows reports while another window deletes the lock.
+    const window = async () => {
+      for (let i = 0; i < 25; i++) {
+        const release = await acquireLock(lockFile, 60_000, 8_000);
+        overlaps += ++holders > 1 ? 1 : 0;
+        await new Promise((resolve) => setTimeout(resolve, Math.random() * 3));
+        holders--;
+        await release();
+      }
+    };
+    await Promise.all(Array.from({ length: 8 }, window));
+    assert.equal(overlaps, 0, 'two windows held the lock at once');
+  });
 });

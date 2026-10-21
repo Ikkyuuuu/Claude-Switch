@@ -73,8 +73,9 @@ function closeLogPage(): void {
 
 /** freshPrompt: a new dialog just arrived, so start it empty and focus it. */
 function render(options: { freshPrompt?: boolean } = {}): void {
-  // Re-rendering replaces the DOM; keep whatever was typed, and the focus.
+  // Re-rendering replaces the DOM; keep whatever was typed, and the focus and caret.
   const focused = focusKey(document.activeElement);
+  const caret = caretOf(document.activeElement);
   const dialogClosed = dialogOpen && !prompt;
   dialogOpen = !!prompt;
   if (options.freshPrompt) {
@@ -110,8 +111,15 @@ function render(options: { freshPrompt?: boolean } = {}): void {
   } else if (dialogClosed) {
     restoreFocus(focusBeforeDialog);
   } else {
-    restoreFocus(focused);
+    restoreFocus(focused, caret);
   }
+}
+
+/** Where the caret, or the selection, is in a text box. */
+function caretOf(element: Element | null): [number, number] | undefined {
+  return element instanceof HTMLInputElement && element.selectionStart !== null && element.selectionEnd !== null
+    ? [element.selectionStart, element.selectionEnd]
+    : undefined;
 }
 
 const FOCUSABLE = 'button, input, a[href], [tabindex]:not([tabindex="-1"])';
@@ -134,7 +142,8 @@ function focusKey(element: Element | null): string | undefined {
   return index >= 0 ? `index:${index}` : undefined;
 }
 
-function restoreFocus(key: string | undefined): void {
+/** caret: put back where the user was typing; a text box that is filled in again otherwise jumps to its end. */
+function restoreFocus(key: string | undefined, caret?: [number, number]): void {
   let target: Element | null | undefined;
   if (key?.startsWith('#')) {
     target = document.getElementById(key.slice(1));
@@ -144,6 +153,9 @@ function restoreFocus(key: string | undefined): void {
     target = app.querySelectorAll(FOCUSABLE)[Number(key.slice(6))];
   }
   (target as HTMLElement | null | undefined)?.focus();
+  if (caret && target instanceof HTMLInputElement) {
+    target.setSelectionRange(...caret);
+  }
 }
 
 // ---------------------------------------------------------------- dialogs and notices
@@ -1157,13 +1169,15 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
   const message = event.data;
   switch (message?.type) {
     case 'state':
-      if (!message.state.signIn) {
-        codeSent = false;
-      }
       state = message.state;
       loadingText = undefined;
       vscode.setState({} satisfies Saved);
       render();
+      if (!state.signIn) {
+        // After the render that removed the sign-in card, which keeps what was typed in it: the next sign-in starts afresh.
+        codeSent = false;
+        drafts.delete('code');
+      }
       break;
     case 'reloading':
       // The window goes down next; the loading screen, with this text, stays until it is back.

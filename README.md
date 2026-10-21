@@ -215,7 +215,7 @@ Note that `.credentials.json` can also hold sign-ins for MCP servers. Because th
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `claudeSwitch.claudePath` | *(empty)* | Path to the Claude Code CLI that **Add Account** uses. Empty means the CLI bundled with the Claude Code extension, else `claude` on PATH. Machine scope. |
+| `claudeSwitch.claudePath` | *(empty)* | Path to the Claude Code CLI that **Add Account** and usage checks use. A bare name such as `claude` is looked up on PATH. Empty means the CLI bundled with the Claude Code extension, else `claude` on PATH. Machine scope. |
 | `claudeSwitch.switchMode` | `reloadWindow` | What happens after a switch: `reloadWindow`, `restartExtensions`, `newConversation` or `instant`. See [Switching](#switching). |
 | `claudeSwitch.confirmBeforeSwitch` | `true` | Ask before switching in the `restartExtensions` and `reloadWindow` modes. Instant switches never ask. |
 | `claudeSwitch.usageCheckSeconds` | `60` | How often to check usage while Claude is idle; after Claude replies, Claude Switch checks within a few seconds anyway. Each check starts Claude Code's CLI for a few seconds. `0` turns usage checks off; the minimum is 10. |
