@@ -6,7 +6,7 @@ import type { LogEntry } from './webview/protocol';
  * entries in memory (nothing is written to disk) and forwards each one to a
  * sink, normally VS Code's "Claude Switch" output channel.
  */
-export class RosterLog implements Logger {
+export class SwitchLog implements Logger {
   private readonly items: LogEntry[] = [];
   private readonly listeners = new Set<() => void>();
 

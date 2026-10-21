@@ -2,7 +2,7 @@ import { nextRenewal, UsageInfo } from './accountDetails';
 import type { ProfileMeta } from './profileStore';
 import type { LiveState } from './switchEngine';
 import { AVATAR_COLOURS, DEFAULT_AVATAR_COLOURS, initialsOf, isAvatarColour } from './webview/avatar';
-import type { AccountCard, RenewalView, RosterViewState, UsageMeter, WebviewMessage } from './webview/protocol';
+import type { AccountCard, RenewalView, SwitchViewState, UsageMeter, WebviewMessage } from './webview/protocol';
 
 // Also exported from here for existing callers.
 export { AVATAR_COLOURS, initialsOf };
@@ -28,13 +28,13 @@ export interface ViewInput {
 }
 
 /** Everything the Accounts webview shows. The sign-in link itself stays in the extension. */
-export function buildViewState(input: ViewInput): RosterViewState {
+export function buildViewState(input: ViewInput): SwitchViewState {
   const { live } = input;
   const activeId = live.kind === 'known' ? live.profile.id : undefined;
   const now = input.now ?? Date.now();
   const toCard = (profile: ProfileMeta) => accountCard(profile, now);
 
-  let current: RosterViewState['current'];
+  let current: SwitchViewState['current'];
   switch (live.kind) {
     case 'known':
       current = { kind: 'account', account: toCard(input.profiles.find((p) => p.id === activeId) ?? live.profile) };
@@ -62,7 +62,7 @@ export function buildViewState(input: ViewInput): RosterViewState {
   };
 }
 
-export function unsupportedState(): RosterViewState {
+export function unsupportedState(): SwitchViewState {
   return { unsupported: true, current: { kind: 'signed-out' }, others: [], hasBackup: false };
 }
 

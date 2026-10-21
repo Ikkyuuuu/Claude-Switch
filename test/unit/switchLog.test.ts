@@ -1,8 +1,8 @@
 import * as assert from 'node:assert/strict';
 import { Logger } from '../../src/log';
-import { RosterLog } from '../../src/rosterLog';
+import { SwitchLog } from '../../src/switchLog';
 
-suite('RosterLog', () => {
+suite('SwitchLog', () => {
   test('keeps entries in order and forwards them to the output channel', () => {
     const forwarded: string[] = [];
     const sink: Logger = {
@@ -11,7 +11,7 @@ suite('RosterLog', () => {
       error: (m) => forwarded.push(`error ${m}`),
     };
     let clock = 1000;
-    const log = new RosterLog(sink, 10, () => clock++);
+    const log = new SwitchLog(sink, 10, () => clock++);
     log.info('one');
     log.warn('two');
     log.error('three');
@@ -24,7 +24,7 @@ suite('RosterLog', () => {
   });
 
   test('keeps only the most recent entries', () => {
-    const log = new RosterLog(undefined, 3);
+    const log = new SwitchLog(undefined, 3);
     for (let i = 1; i <= 5; i++) {
       log.info(`entry ${i}`);
     }
@@ -36,7 +36,7 @@ suite('RosterLog', () => {
 
   test('redacts anything token-shaped, in the tab and in the output channel', () => {
     const forwarded: string[] = [];
-    const log = new RosterLog({ info: (m) => forwarded.push(m), warn() {}, error() {} });
+    const log = new SwitchLog({ info: (m) => forwarded.push(m), warn() {}, error() {} });
     log.info('oops sk-ant-oat01-SECRETSECRET leaked');
     assert.ok(!log.entries[0].message.includes('SECRET'));
     assert.ok(!forwarded[0].includes('SECRET'));
@@ -44,7 +44,7 @@ suite('RosterLog', () => {
   });
 
   test('notifies listeners, clears, and stops notifying when unsubscribed', () => {
-    const log = new RosterLog();
+    const log = new SwitchLog();
     let changes = 0;
     const stop = log.onDidChange(() => changes++);
     log.info('a');
@@ -57,7 +57,7 @@ suite('RosterLog', () => {
   });
 
   test('formats the log as text for copying', () => {
-    const log = new RosterLog(undefined, 10, () => Date.UTC(2026, 9, 20, 7, 30));
+    const log = new SwitchLog(undefined, 10, () => Date.UTC(2026, 9, 20, 7, 30));
     log.warn('careful');
     assert.equal(log.toText(), '2026-10-20T07:30:00.000Z [warn] careful');
   });

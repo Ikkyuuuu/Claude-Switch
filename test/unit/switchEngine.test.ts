@@ -353,8 +353,62 @@ suite('SwitchEngine', () => {
     await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
     assert.deepEqual(await folders.list(), [personal.id]);
     // Personal became the default account (Switch All Windows, or /login).
+    await writeLive(paths, loginB);
     await engine.reconcileFolders(folders, personal.id, new Set([personal.id]));
     assert.deepEqual(await folders.list(), []);
+  });
+
+  test('goes by the login in ~/.claude, not by what the caller last saw, to tell the default account', async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    // The caller still thinks Personal is the default, but Work is: Work gets no folder of its own.
+    await engine.reconcileFolders(folders, personal.id, new Set([work.id, personal.id]));
+    assert.deepEqual(await folders.list(), [personal.id]);
+
+    // While the default login can't be read, nothing changes.
+    await writeLive(paths, { credentialsRaw: loginB.credentialsRaw, account: loginA.account });
+    await assert.rejects(engine.reconcileFolders(folders, undefined, new Set([work.id, personal.id])), /don't match/);
+    assert.deepEqual(await folders.list(), [personal.id]);
+  });
+
+  test('Switch All Windows takes the newest tokens from the login folder, which goes with the switch', async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    // Claude refreshed Personal's login in its folder.
+    const refreshed = fakeLogin('B', { version: 7 });
+    await folders.write(personal.id, refreshed.credentialsRaw);
+
+    await engine.switchTo(personal.id, { folders });
+    assert.equal((await readSnapshot(paths)).credentialsRaw, refreshed.credentialsRaw, 'the refreshed login, not the saved one');
+    assert.deepEqual(await folders.list(), [], 'one place only');
+    assert.equal((await store.getLogin(personal.id))?.credentialsRaw, refreshed.credentialsRaw);
+  });
+
+  test('restores a backup with the newest tokens from its login folder, which goes too', async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    await engine.switchTo(personal.id);
+    // Since then, a window used Work, the account in the backup, and Claude refreshed it there.
+    await engine.reconcileFolders(folders, personal.id, new Set([work.id]));
+    const refreshed = fakeLogin('A', { version: 8 });
+    await folders.write(work.id, refreshed.credentialsRaw);
+
+    await engine.restoreBackup(undefined, folders);
+    assert.equal((await readSnapshot(paths)).credentialsRaw, refreshed.credentialsRaw);
+    assert.deepEqual(await folders.list(), []);
+  });
+
+  test('backs up an unsaved login before restoring over it', async () => {
+    await engine.switchTo(personal.id);
+    // Claude was then signed in to an account that isn't saved, say with /login.
+    const stranger = fakeLogin('Stranger');
+    await writeLive(paths, stranger);
+
+    await engine.restoreBackup();
+    assert.equal((await readSnapshot(paths)).credentialsRaw, loginA.credentialsRaw);
+    // Restoring again brings the unsaved login back.
+    await engine.restoreBackup();
+    const live = await readSnapshot(paths);
+    assert.equal(live.credentialsRaw, stranger.credentialsRaw);
+    assert.deepEqual(live.account, stranger.account);
   });
 
   test('saves tokens refreshed in a login folder only when they are newer and the right organization', async () => {
@@ -407,6 +461,16 @@ suite('SwitchEngine', () => {
     const started = Date.now();
     await engine.switchTo(personal.id);
     assert.ok(Date.now() - started < 500, 'did not wait for the lock');
+  });
+
+  test("never releases a lock that another window took over", async () => {
+    const lockFile = path.join(home, 'storage', 'switch.lock');
+    const release = await acquireLock(lockFile);
+    // This window held it too long, so another one took it over as abandoned.
+    const theirs = `${process.ppid} ${new Date().toISOString()} theirs`;
+    await fs.writeFile(lockFile, theirs);
+    await release();
+    assert.equal(await fs.readFile(lockFile, 'utf8'), theirs);
   });
 
   test('waits for a lock held by a running window', async () => {

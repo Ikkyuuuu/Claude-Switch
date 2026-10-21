@@ -70,7 +70,7 @@ export const OTHER_CONFIG = {
 const fakeHomes: string[] = [];
 
 export async function makeFakeHome(): Promise<{ home: string; paths: ClaudePaths }> {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'roster-test-home-'));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-test-home-'));
   fakeHomes.push(home);
   return { home, paths: resolvePaths({}, home) };
 }

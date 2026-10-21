@@ -86,8 +86,6 @@ suite('ProfileStore', () => {
   test('clearAll leaves nothing behind', async () => {
     const a = await store.add('Work', fakeLogin('A'));
     await store.pushBackup(fakeLogin('A'), { fromProfileId: a.id });
-    // Written by versions before 0.9.
-    await state.update('roster.dismissedIdentities', ['x']);
     await store.clearAll();
     assert.equal(secrets.data.size, 0);
     assert.equal(state.data.size, 0);
@@ -159,13 +157,13 @@ suite('ProfileStore', () => {
 
   test('shows and keeps a rename while an older value comes back from VS Code', async () => {
     const a = await store.add('Work', fakeLogin('A'));
-    const before = state.get('roster.profiles');
+    const before = state.get('claudeSwitch.profiles');
     await store.edit(a.id, { alias: 'Office', color: 1 });
     // A moment later, VS Code sends an older write back.
-    await state.update('roster.profiles', before);
+    await state.update('claudeSwitch.profiles', before);
     assert.equal(store.get(a.id)?.alias, 'Office');
     await store.setStatus(a.id, 'needs-relogin');
-    const stored = state.get<{ alias: string; status: string }[]>('roster.profiles');
+    const stored = state.get<{ alias: string; status: string }[]>('claudeSwitch.profiles');
     assert.deepEqual([stored?.[0].alias, stored?.[0].status], ['Office', 'needs-relogin'], 'the next write keeps the rename');
   });
 
@@ -178,7 +176,7 @@ suite('ProfileStore', () => {
       if (!overwritten) {
         // Another window's older write arrives just after ours.
         overwritten = true;
-        await update('roster.profiles', [{ ...a }]);
+        await update('claudeSwitch.profiles', [{ ...a }]);
       }
     };
     await store.edit(a.id, { alias: 'Office', color: 4 });

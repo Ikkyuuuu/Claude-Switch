@@ -1,4 +1,4 @@
-import type { AccountCard, HostMessage, LogEntry, Notice, PromptSpec, RosterViewState, UsageMeter, WebviewMessage } from './protocol';
+import type { AccountCard, HostMessage, LogEntry, Notice, PromptSpec, SwitchViewState, UsageMeter, WebviewMessage } from './protocol';
 import { AVATAR_COLOURS, initialsOf } from './avatar';
 import { checkInput } from './rules';
 
@@ -27,7 +27,7 @@ interface Saved {
 }
 const saved = (vscode.getState() ?? {}) as Saved;
 /** Undefined until the extension sends the accounts; the tab shows the loading screen meanwhile. */
-let state: RosterViewState | undefined;
+let state: SwitchViewState | undefined;
 let loadingText = typeof saved.loadingText === 'string' ? saved.loadingText : undefined;
 /** When the loading screen appeared; after a while it suggests what to do. */
 let loadingSince = Date.now();
@@ -376,7 +376,7 @@ function notifications(): HTMLElement | null {
   );
 }
 
-function view(s: RosterViewState): Node[] {
+function view(s: SwitchViewState): Node[] {
   if (s.unsupported) {
     return [
       h(
@@ -483,7 +483,7 @@ function section(label: string, ...children: Node[]): HTMLElement {
   return h('section', { class: 'section' }, h('h2', { class: 'section-label' }, label), ...children);
 }
 
-function currentCard(current: RosterViewState['current']): HTMLElement {
+function currentCard(current: SwitchViewState['current']): HTMLElement {
   switch (current.kind) {
     case 'account': {
       const a = current.account;
@@ -605,7 +605,7 @@ function switchLabel(a: AccountCard): string {
   return state?.perWindow === false ? `Switch to ${a.alias}` : `Use ${a.alias} in this window`;
 }
 
-function signInCard(signIn: NonNullable<RosterViewState['signIn']>): HTMLElement {
+function signInCard(signIn: NonNullable<SwitchViewState['signIn']>): HTMLElement {
   const disabled = !signIn.hasLink;
   return h(
     'section',

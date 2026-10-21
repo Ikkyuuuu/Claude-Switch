@@ -4,7 +4,8 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ClaudeLogin } from '../../src/addAccount';
 import { readSnapshot } from '../../src/claudeFiles';
-import type { RosterTestApi } from '../../src/extension';
+import type { SwitchTestApi } from '../../src/extension';
+import { legacyCommandId } from '../../src/legacyNames';
 import type { ProfileMeta } from '../../src/profileStore';
 import type { UsageCheckOptions } from '../../src/usageCheck';
 import type { AccountCard } from '../../src/webview/protocol';
@@ -15,7 +16,7 @@ import { fakeLogin, fakeUsageCache, OTHER_CONFIG, writeLive } from '../fixtures'
  * throwaway folder, so these tests never see the real Claude login.
  */
 suite('Claude Switch in VS Code', () => {
-  let api: RosterTestApi;
+  let api: SwitchTestApi;
   let reloads = 0;
   let restarts = 0;
   let conversations = 0;
@@ -24,7 +25,7 @@ suite('Claude Switch in VS Code', () => {
 
   suiteSetup(async () => {
     assert.ok(process.env.CLAUDE_CONFIG_DIR, 'CLAUDE_CONFIG_DIR must point at a fake folder');
-    const extension = vscode.extensions.getExtension<RosterTestApi>('wattanun42.claude-switch-accounts');
+    const extension = vscode.extensions.getExtension<SwitchTestApi>('wattanun42.claude-switch-accounts');
     assert.ok(extension, 'extension is installed');
     api = (await extension.activate())!;
     assert.ok(api, 'activate() returns the test API under the test runner');
@@ -44,9 +45,9 @@ suite('Claude Switch in VS Code', () => {
       return usageReply;
     };
     // Clicks in the webview carry no skipConfirm, and a modal dialog would block the test.
-    await vscode.workspace.getConfiguration('claudeRoster').update('confirmBeforeSwitch', false, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration('claudeSwitch').update('confirmBeforeSwitch', false, vscode.ConfigurationTarget.Global);
     // Most tests look at the instant mode's checks; one test covers the default, reloading.
-    await vscode.workspace.getConfiguration('claudeRoster').update('switchMode', 'newConversation', vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration('claudeSwitch').update('switchMode', 'newConversation', vscode.ConfigurationTarget.Global);
   });
 
   test('registers every command and the activity bar tab', async () => {
@@ -69,10 +70,12 @@ suite('Claude Switch in VS Code', () => {
       'signIn.cancel',
     ];
     for (const id of ids) {
-      assert.ok(commands.includes(`claudeRoster.${id}`), `claudeRoster.${id}`);
+      assert.ok(commands.includes(`claudeSwitch.${id}`), `claudeSwitch.${id}`);
+      // Keybindings made before 0.14 still work.
+      assert.ok(commands.includes(legacyCommandId(`claudeSwitch.${id}`)), legacyCommandId(`claudeSwitch.${id}`));
     }
-    assert.ok(commands.includes('workbench.view.extension.claudeRoster'), 'Claude Switch tab is contributed');
-    await vscode.commands.executeCommand('workbench.view.extension.claudeRoster');
+    assert.ok(commands.includes('workbench.view.extension.claudeSwitch'), 'Claude Switch tab is contributed');
+    await vscode.commands.executeCommand('workbench.view.extension.claudeSwitch');
   });
 
   test('shows the default account and its usage', async () => {
@@ -149,6 +152,24 @@ suite('Claude Switch in VS Code', () => {
     await api.controller.switchAccount({ profileId: work.id });
   });
 
+  test("won't switch this window while it can't tell which account is the default", async () => {
+    const { work } = profiles();
+    const workLogin = await api.store.getLogin(work.id);
+    assert.ok(workLogin);
+    // Work's tokens next to Personal's identity: the default account is Work, but the files disagree.
+    await writeLive(api.paths, { credentialsRaw: workLogin.credentialsRaw, account: fakeLogin('Personal').account });
+    try {
+      await api.controller.switchAccount({ profileId: work.id });
+      await waitFor(async () => (api.view.currentNotices.some((n) => n.level === 'error' && n.text.includes("don't match")) ? true : undefined));
+      assert.ok(!api.window.folders.has(work.id), "Work's login is not copied into a folder of its own");
+      assert.equal(api.window.loginDir, undefined);
+    } finally {
+      await writeLive(api.paths, workLogin);
+      await api.controller.refresh();
+    }
+    assert.match(api.statusText(), /\$\(account\) Work/);
+  });
+
   test('switches every window with Switch All Windows, and repairs write-backs', async () => {
     const { work, personal } = profiles();
     const workLogin = await api.store.getLogin(work.id);
@@ -186,7 +207,7 @@ suite('Claude Switch in VS Code', () => {
   });
 
   test('reloads only this window by default, and restarts as switchMode says', async () => {
-    const config = vscode.workspace.getConfiguration('claudeRoster');
+    const config = vscode.workspace.getConfiguration('claudeSwitch');
     const { work, personal } = profiles();
     const conversationsBefore = conversations;
     // The tab shows its loading screen, saying what happens, until the window is back.
@@ -198,15 +219,15 @@ suite('Claude Switch in VS Code', () => {
     };
     try {
       await config.update('switchMode', undefined, vscode.ConfigurationTarget.Global);
-      assert.equal(vscode.workspace.getConfiguration('claudeRoster').inspect('switchMode')?.defaultValue, 'reloadWindow');
-      await vscode.commands.executeCommand('claudeRoster.switch', { profileId: personal.id, skipConfirm: true });
+      assert.equal(vscode.workspace.getConfiguration('claudeSwitch').inspect('switchMode')?.defaultValue, 'reloadWindow');
+      await vscode.commands.executeCommand('claudeSwitch.switch', { profileId: personal.id, skipConfirm: true });
       assert.equal(reloads, 1);
       assert.deepEqual(loadingTexts, ['Switching to Personal…']);
       assert.match(api.statusText(), /\$\(account\) Personal/);
       assert.equal(api.window.loginDir, api.window.folders.dirOf(personal.id), 'set before reloading, and again on startup');
 
       await config.update('switchMode', 'restartExtensions', vscode.ConfigurationTarget.Global);
-      await vscode.commands.executeCommand('claudeRoster.switch', { profileId: work.id, skipConfirm: true });
+      await vscode.commands.executeCommand('claudeSwitch.switch', { profileId: work.id, skipConfirm: true });
       assert.equal(restarts, 1);
       assert.equal(reloads, 1);
       assert.match(api.statusText(), /\$\(account\) Work/);
@@ -346,7 +367,7 @@ suite('Claude Switch in VS Code', () => {
       return refresh();
     };
     // Without auto-refresh, any refresh in the pause below would come from a loop.
-    const config = vscode.workspace.getConfiguration('claudeRoster');
+    const config = vscode.workspace.getConfiguration('claudeSwitch');
     await config.update('autoRefreshSeconds', 0, vscode.ConfigurationTarget.Global);
     try {
       await writeLive(api.paths, { credentialsRaw: fakeLogin('Work').credentialsRaw, account: fakeLogin('Personal').account });
@@ -375,7 +396,7 @@ suite('Claude Switch in VS Code', () => {
     );
     // Opens the log page in the tab; must not throw or open anything else.
     const terminalsBefore = vscode.window.terminals.length;
-    await vscode.commands.executeCommand('claudeRoster.showLog');
+    await vscode.commands.executeCommand('claudeSwitch.showLog');
     assert.equal(vscode.window.terminals.length, terminalsBefore);
   });
 

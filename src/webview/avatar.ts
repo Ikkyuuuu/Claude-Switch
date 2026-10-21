@@ -3,7 +3,7 @@
  * and no Node APIs.
  */
 
-/** Colours an account can be given; matches the .avatar-N classes in media/roster.css. */
+/** Colours an account can be given; matches the .avatar-N classes in media/switch.css. */
 export const AVATAR_COLOURS = 12;
 
 /**

@@ -2,11 +2,21 @@
   "version": "0.2.0",
   "configurations": [
     {
+      // Saved accounts, window choices and login folders live in VS Code's storage, so the sandbox
+      // gets a VS Code profile folder of its own too, away from the accounts you really use.
       "name": "Run Extension (sandbox Claude folder)",
       "type": "extensionHost",
       "request": "launch",
-      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
-      "env": { "CLAUDE_CONFIG_DIR": "${env:TEMP}\\claude-roster-sandbox" },
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}", "--user-data-dir=${env:TEMP}\\claude-switch-sandbox-vscode"],
+      "env": { "CLAUDE_CONFIG_DIR": "${env:TEMP}\\claude-switch-sandbox" },
+      "linux": {
+        "args": ["--extensionDevelopmentPath=${workspaceFolder}", "--user-data-dir=/tmp/claude-switch-sandbox-vscode"],
+        "env": { "CLAUDE_CONFIG_DIR": "/tmp/claude-switch-sandbox" }
+      },
+      "osx": {
+        "args": ["--extensionDevelopmentPath=${workspaceFolder}", "--user-data-dir=/tmp/claude-switch-sandbox-vscode"],
+        "env": { "CLAUDE_CONFIG_DIR": "/tmp/claude-switch-sandbox" }
+      },
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "preLaunchTask": "npm: watch"
     },

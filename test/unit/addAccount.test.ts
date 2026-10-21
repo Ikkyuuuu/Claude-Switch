@@ -2,8 +2,9 @@ import * as assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ClaudeLogin, ClaudeLoginOptions, createLoginDir, findOnPath, isValidEmail, removeLoginDir, waitForLogin } from '../../src/addAccount';
+import { ClaudeLogin, ClaudeLoginOptions, createLoginDir, findOnPath, isValidEmail, removeLoginDir, removeStaleLoginDirs, waitForLogin } from '../../src/addAccount';
 import { resolvePaths } from '../../src/claudeFiles';
+import { LEGACY_LOGIN_DIR_PREFIX } from '../../src/legacyNames';
 import { fakeLogin, writeLive } from '../fixtures';
 
 const FAKE_CLAUDE = path.join(__dirname, '..', 'fakeClaude.js');
@@ -131,12 +132,38 @@ suite('addAccount', () => {
     await assert.rejects(fs.access(dir));
   });
 
+  test('deletes sign-in folders an unfinished Add Account left behind, but not one that may still be in use', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-stale-'));
+    try {
+      const left = await createLoginDir(root);
+      await fs.writeFile(path.join(left, '.credentials.json'), '{}');
+      const running = await createLoginDir(root);
+      // Made by a version before 0.14, under the old name.
+      const older = path.join(root, `${LEGACY_LOGIN_DIR_PREFIX}abc123`);
+      await fs.mkdir(older);
+      const unrelated = path.join(root, 'something-else');
+      await fs.mkdir(unrelated);
+      const hourAgo = new Date(Date.now() - 60 * 60_000);
+      for (const dir of [left, older, unrelated]) {
+        await fs.utimes(dir, hourAgo, hourAgo);
+      }
+
+      assert.equal(await removeStaleLoginDirs(root), 2);
+      await assert.rejects(fs.access(left), 'the folder from an hour ago is gone');
+      await assert.rejects(fs.access(older), 'and the one from an older version');
+      await fs.access(running);
+      await fs.access(unrelated);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('refuses to delete anything that is not its own sign-in folder', async () => {
-    const other = await fs.mkdtemp(path.join(os.tmpdir(), 'not-roster-'));
+    const other = await fs.mkdtemp(path.join(os.tmpdir(), 'not-claude-switch-'));
     try {
       await assert.rejects(removeLoginDir(other), /Refusing/);
       await assert.rejects(removeLoginDir(os.homedir()), /Refusing/);
-      await assert.rejects(removeLoginDir(path.join(other, 'claude-roster-login-x')), /Refusing/);
+      await assert.rejects(removeLoginDir(path.join(other, 'claude-switch-login-x')), /Refusing/);
       await fs.access(other);
     } finally {
       await fs.rm(other, { recursive: true, force: true });
@@ -146,7 +173,7 @@ suite('addAccount', () => {
 
 suite('findOnPath', () => {
   test('finds an npm-installed claude.cmd on Windows, and only in absolute PATH folders', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roster-path-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-path-'));
     try {
       await fs.writeFile(path.join(dir, 'claude.cmd'), '@echo off');
       const env = { Path: ['relative-dir', dir].join(path.delimiter), PATHEXT: '.COM;.EXE;.BAT;.CMD' };

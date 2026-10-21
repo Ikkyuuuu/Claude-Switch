@@ -14,30 +14,72 @@ suite('Claude activity', () => {
     }
   });
 
-  test("notices Claude writing a conversation, and nothing else", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roster-activity-'));
-    const project = path.join(dir, 'projects', 'c--work-my-app');
-    await fs.mkdir(project, { recursive: true });
-    let seen = 0;
-    const projects = new Set<string>();
-    const activity = new ClaudeActivity(dir, (project) => {
-      seen++;
-      projects.add(project);
+  /** Resolves once activity is reported, or after a few seconds. */
+  async function settle(seen: () => number): Promise<void> {
+    const deadline = Date.now() + 5000;
+    while (seen() === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  // Windows and macOS watch the projects folder as a tree; Linux watches each project folder.
+  for (const recursive of [true, false]) {
+    test(`notices Claude writing a conversation, and nothing else (${recursive ? 'one watch for the tree' : 'a watch per project folder'})`, async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-activity-'));
+      const project = path.join(dir, 'projects', 'c--work-my-app');
+      await fs.mkdir(project, { recursive: true });
+      let seen = 0;
+      const projects = new Set<string>();
+      const activity = new ClaudeActivity(
+        dir,
+        (project) => {
+          seen++;
+          projects.add(project);
+        },
+        60_000,
+        recursive,
+      );
+      activity.start();
+      try {
+        await fs.writeFile(path.join(dir, 'settings.json'), '{}');
+        await fs.writeFile(path.join(project, 'notes.txt'), 'x');
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        assert.equal(seen, 0, 'other files are ignored');
+
+        await fs.appendFile(path.join(project, 'a1b2.jsonl'), '{"type":"assistant"}\n');
+        await settle(() => seen);
+        assert.ok(seen > 0, 'a conversation file changed');
+        assert.deepEqual([...projects], ['c--work-my-app'], 'with its project folder');
+
+        // A project opened for the first time.
+        projects.clear();
+        seen = 0;
+        const added = path.join(dir, 'projects', 'c--work-new-app');
+        await fs.mkdir(added);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await fs.appendFile(path.join(added, 'c3d4.jsonl'), '{"type":"assistant"}\n');
+        await settle(() => seen);
+        assert.deepEqual([...projects], ['c--work-new-app']);
+      } finally {
+        activity.dispose();
+        await fs.rm(dir, { recursive: true, force: true });
+      }
     });
+  }
+
+  test('starts watching as soon as Claude makes its projects folder', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-activity-'));
+    let seen = 0;
+    // The retry is far off: the watch must not depend on it.
+    const activity = new ClaudeActivity(dir, () => seen++, 10 * 60_000);
     activity.start();
     try {
-      await fs.writeFile(path.join(dir, 'settings.json'), '{}');
-      await fs.writeFile(path.join(project, 'notes.txt'), 'x');
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      assert.equal(seen, 0, 'other files are ignored');
-
+      const project = path.join(dir, 'projects', 'c--work-my-app');
+      await fs.mkdir(project, { recursive: true });
+      await new Promise((resolve) => setTimeout(resolve, 300));
       await fs.appendFile(path.join(project, 'a1b2.jsonl'), '{"type":"assistant"}\n');
-      const deadline = Date.now() + 5000;
-      while (seen === 0 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      assert.ok(seen > 0, 'a conversation file changed');
-      assert.deepEqual([...projects], ['c--work-my-app'], 'with its project folder');
+      await settle(() => seen);
+      assert.ok(seen > 0);
     } finally {
       activity.dispose();
       await fs.rm(dir, { recursive: true, force: true });
@@ -45,7 +87,7 @@ suite('Claude activity', () => {
   });
 
   test('waits for a folder that does not exist yet', () => {
-    const activity = new ClaudeActivity(path.join(os.tmpdir(), 'roster-no-such-folder-xyz'), () => undefined, 10_000);
+    const activity = new ClaudeActivity(path.join(os.tmpdir(), 'claude-switch-no-such-folder-xyz'), () => undefined, 10_000);
     activity.start();
     activity.dispose();
   });

@@ -1,16 +1,16 @@
 import * as vscode from 'vscode';
 import { LiveState } from './switchEngine';
 
-export class RosterStatusBar implements vscode.Disposable {
+export class SwitchStatusBar implements vscode.Disposable {
   private readonly item: vscode.StatusBarItem;
 
   constructor() {
-    this.item = vscode.window.createStatusBarItem('claudeRoster.status', vscode.StatusBarAlignment.Right, 100);
+    this.item = vscode.window.createStatusBarItem('claudeSwitch.status', vscode.StatusBarAlignment.Right, 100);
     this.item.name = 'Claude Switch';
     // Until the first check of the login finishes.
     this.item.text = '$(sync~spin) Claude Switch';
     this.item.tooltip = 'Claude Switch is checking which account this window uses…';
-    this.item.command = 'claudeRoster.switch';
+    this.item.command = 'claudeSwitch.switch';
     this.item.show();
   }
 
@@ -20,13 +20,13 @@ export class RosterStatusBar implements vscode.Disposable {
 
   /** reloadPending: another window switched accounts and this one still runs the old login. */
   update(live: LiveState, reloadPending?: { alias?: string }): void {
-    this.item.command = 'claudeRoster.switch';
+    this.item.command = 'claudeSwitch.switch';
     this.item.backgroundColor = undefined;
 
     if (reloadPending) {
       this.item.text = `$(refresh) Reload for ${plain(reloadPending.alias ?? 'new account')}`;
       this.item.tooltip = "This window's Claude account changed in another window. Click to reload this window, so Claude Code here uses it.";
-      this.item.command = 'claudeRoster.reloadNow';
+      this.item.command = 'claudeSwitch.reloadNow';
       this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
       return;
     }

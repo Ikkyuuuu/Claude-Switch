@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.14.0
+
+- **One name everywhere.** Settings, commands and the tab now go by Claude Switch inside too, under `claudeSwitch.*`, as do the files Claude Switch makes. Nothing to do on your part:
+  - Your saved accounts, backups and each project's account carry over.
+  - Settings you changed move to the new names the first time this version starts. VS Code lets no extension remove settings it no longer declares, so the old entries stay in `settings.json`, greyed out and unused; you can delete them.
+  - Keybindings you made for Claude Switch's commands keep working.
+  - If you moved the Accounts view elsewhere in VS Code, it is back in its own tab in the activity bar.
+
+Bug fixes:
+
+- Fixed: a window could give the default account a login folder too, so one login was in two places and one copy could sign the other out. It happened when the default account changed after the window last looked, for example during the confirmation before a switch, or in another window at the same moment. Login folders now go by the login in `~/.claude` at the time they change.
+- Fixed: switching only this window while Claude's login files disagreed (tokens of one account next to another's details) could copy the default account into a login folder. Claude Switch now says what is wrong and switches nothing; **Switch All Windows** still works.
+- Fixed: **Switch All Windows** and **Restore Last Backup** saved the account's newest tokens from its login folder, and removed the folder, in separate steps. A Claude that refreshed the login in between left `~/.claude` with a refresh token that no longer worked. Both now happen in the switch itself.
+- Fixed: **Restore Last Backup** replaced a login that isn't saved in Claude Switch without backing it up, so it was lost. It is now backed up first, and restoring again brings it back.
+- Fixed: a window that held the switch lock for longer than 2 minutes deleted the lock another window had taken over since, so two switches could run at once.
+- Fixed: a refresh asked for while another was running, for example right after a switch, could show what the files held before the switch. Two refreshes could also update this window's account at the same time, which right after VS Code started could ask for a reload that wasn't needed.
+- Fixed: errors from **Sign in again** on an expired account, **Switch now** after adding one, signing in in a terminal, a write-back check and the checks when a window starts went unreported. They now show in the tab.
+- Fixed: on Linux, WSL and Remote SSH, watching for Claude's replies made Node walk and watch every file under `~/.claude`, which could make VS Code slow to start and use up the system's file watches. Claude Switch now watches only `~/.claude/projects`, with one watch per project folder on Linux.
+- Fixed: a sign-in folder from an Add Account that a closing or reloading window did not finish stayed in the temp folder, with any tokens in it. Claude Switch now deletes such folders when it starts, once they are half an hour old, including ones older versions left.
+- Fixed: a failed write could leave a temporary file next to a Claude file.
+- Fixed: the Accounts view kept the listeners of every earlier copy of itself each time it was hidden and shown.
+- Development: **Run Extension (sandbox Claude folder)** now also uses a VS Code profile folder of its own. Before, it showed and changed the accounts saved in your real VS Code, so **Remove All Saved Data** there removed them. It also works on Linux and macOS now.
+
 ## 0.13.0
 
 - **Every window shows the same usage at the same time.** Windows without the focus now show what the focused window found within a second, from memory, without reading any files.
@@ -10,18 +33,18 @@
 ## 0.12.0
 
 - **Usage follows your use.** Claude Switch checks usage a few seconds after Claude replies, in any window, instead of on a fixed timer: once a reply has finished, or every 10 seconds during a long one, and never two checks within 5 seconds. It notices replies by watching for changes to Claude Code's conversation files under `~/.claude/projects`, without reading them.
-- While Claude is idle, usage is checked every minute again (`claudeRoster.usageCheckSeconds`, now 60 by default), to catch usage on claude.ai or another computer. Fewer requests overall, and none while you are not using Claude.
+- While Claude is idle, usage is checked every minute again (`claudeSwitch.usageCheckSeconds`, now 60 by default), to catch usage on claude.ai or another computer. Fewer requests overall, and none while you are not using Claude.
 
 ## 0.11.3
 
-- The tab and status bar re-read the login every second (`claudeRoster.autoRefreshSeconds`, now 1 by default), so a switch in another window or a `/login` shows within a second. These are local file reads.
+- The tab and status bar re-read the login every second (`claudeSwitch.autoRefreshSeconds`, now 1 by default), so a switch in another window or a `/login` shows within a second. These are local file reads.
 - Reset countdowns and "Updated … ago" update every second.
 - A switch in another window is noticed within a second, and a terminal sign-in is picked up within a second.
 - Usage checks stay at most every 10 seconds: each one starts the Claude CLI and asks Anthropic, which takes a few seconds.
 
 ## 0.11.2
 
-- Usage is checked every 10 seconds instead of every minute (`claudeRoster.usageCheckSeconds`, now 10 by default and at least 10). Each check gets fresh numbers: Claude Switch clears the ones the CLI saved in the check's own settings folder, which it would otherwise reuse for a minute.
+- Usage is checked every 10 seconds instead of every minute (`claudeSwitch.usageCheckSeconds`, now 10 by default and at least 10). Each check gets fresh numbers: Claude Switch clears the ones the CLI saved in the check's own settings folder, which it would otherwise reuse for a minute.
 - After a failed usage check, for example when Anthropic limits requests, the next one waits longer: 30 seconds, doubling up to 10 minutes.
 
 ## 0.11.1
@@ -39,7 +62,7 @@ Bug fixes and polish.
 - Fixed: a window's account choice older than 30 days came back after a restart and switched the window a few seconds later.
 - Fixed: after a failed sign-in, Add account did nothing until the error was dismissed.
 - Fixed: errors from clicks in the tab, such as saving an edit to an account another window had just removed, went unreported. They now show in the tab.
-- Fixed: usage checks only ran as often as auto-refresh; they now follow `claudeRoster.usageCheckSeconds` on their own.
+- Fixed: usage checks only ran as often as auto-refresh; they now follow `claudeSwitch.usageCheckSeconds` on their own.
 - Fixed: the loading screen could stay up if a reload was cancelled. The status bar's Reload button now restarts extensions only, in that mode.
 - Keyboard and screen readers: focus stays where it was when the tab updates and returns after a dialog closes; notices are read out once; each account row has a proper button, with Edit and Remove beside it.
 - An expired account shows **Sign in again** instead of suggesting `/login`, which in a window with its own account would mix up the shared account details.
@@ -78,10 +101,10 @@ Bug fixes.
 
 ## 0.10.0
 
-- New setting `claudeRoster.switchMode` chooses what happens after a switch: `reloadWindow` (default, as before), `restartExtensions` (restart extensions only, a few seconds), or one of two instant modes that restart nothing: `newConversation` opens a new Claude Code conversation on the new account, and `instant` doesn't. In the instant modes, conversations that were already open keep the previous account until you start a new one.
+- New setting `claudeSwitch.switchMode` chooses what happens after a switch: `reloadWindow` (default, as before), `restartExtensions` (restart extensions only, a few seconds), or one of two instant modes that restart nothing: `newConversation` opens a new Claude Code conversation on the new account, and `instant` doesn't. In the instant modes, conversations that were already open keep the previous account until you start a new one.
 - After an instant switch, Claude Switch watches for older conversations writing the previous login back. It quietly repairs a rewritten `oauthAccount`, and warns you, with a **Switch again** button, if the whole old login comes back.
 - Clicking accounts repeatedly no longer starts one switch per click. While a switch runs, the account list is greyed out and further clicks are ignored. A notice that repeats replaces the one showing instead of stacking.
-- Usage is up to date. Once a minute, while the tab is open, Claude Switch asks Claude Code's own CLI for the current usage, as Claude Code's Account & Usage panel does, instead of waiting for Claude Code to save it. Claude Switch still makes no network requests and never handles your token. New setting `claudeRoster.usageCheckSeconds` (default 60, `0` turns it off). After a switch, the new account's usage is checked right away.
+- Usage is up to date. Once a minute, while the tab is open, Claude Switch asks Claude Code's own CLI for the current usage, as Claude Code's Account & Usage panel does, instead of waiting for Claude Code to save it. Claude Switch still makes no network requests and never handles your token. New setting `claudeSwitch.usageCheckSeconds` (default 60, `0` turns it off). After a switch, the new account's usage is checked right away.
 - A limit that resets within the hour shows a countdown, such as "Resets in 23 minutes", instead of the clock time. It counts down while the tab is open.
 - Usage bars turn yellow from 70% and red from 80% (were 75% and 90%), for an earlier warning.
 - A switch now waits a few seconds for another window's switch or a usage check to finish, instead of failing.
@@ -125,7 +148,7 @@ Bug fixes.
 
 ## 0.7.0
 
-- Auto-refresh: while the window is focused, the tab and status bar re-read the login and Claude Code's usage numbers every 10 seconds. Change the interval with `claudeRoster.autoRefreshSeconds`, or set it to `0` to turn it off. These are local file reads only, and the view redraws only when something changed.
+- Auto-refresh: while the window is focused, the tab and status bar re-read the login and Claude Code's usage numbers every 10 seconds. Change the interval with `claudeSwitch.autoRefreshSeconds`, or set it to `0` to turn it off. These are local file reads only, and the view redraws only when something changed.
 - Removed text the tab didn't need:
   - the "Unofficial" badge and the footer disclaimer
   - the "Restore last backup" link (the command is still in the Command Palette and the ⋯ menu)
@@ -135,7 +158,7 @@ Bug fixes.
 
 ## 0.6.0
 
-- **Show Log** now opens an activity log page in the Claude Roster tab instead of the Output panel. Entries are newest first, with info, warning and error markers, plus **Copy**, **Clear** and **Open in Output panel** buttons. The command, the footer link and the "Show Log" buttons on error messages all open it.
+- **Show Log** now opens an activity log page in the Claude Switch tab instead of the Output panel. Entries are newest first, with info, warning and error markers, plus **Copy**, **Clear** and **Open in Output panel** buttons. The command, the footer link and the "Show Log" buttons on error messages all open it.
 - Facebook blue replaces the multi-colour gradient: in the accents, the active account's outline, plan badges, sign-in steps and the logo. Dark themes use Facebook's lighter dark-mode blue.
 - Usage bars are blue, then yellow when nearly full (75%) and red when almost full (90%).
 
@@ -158,7 +181,7 @@ Bug fixes.
 
 ## 0.4.0
 
-- Redesigned the Claude Roster tab as a custom view:
+- Redesigned the Claude Switch tab as a custom view:
   - A welcome page with an **Add account** button.
   - The active account in a highlighted card, and other accounts with coloured avatars and one-click switching.
   - A step-by-step sign-in card with a box for pasting the code.
@@ -168,13 +191,13 @@ Bug fixes.
 
 ## 0.3.0
 
-- Add Account signs in through your browser instead of a terminal. It runs `claude auth login` in the background, and the Claude Roster tab offers to open or copy the sign-in link, paste a code, or cancel.
+- Add Account signs in through your browser instead of a terminal. It runs `claude auth login` in the background, and the Claude Switch tab offers to open or copy the sign-in link, paste a code, or cancel.
 - Signing in again to an expired account pre-fills its email.
-- The `claudeRoster.claudeCommand` setting is replaced by `claudeRoster.claudePath`. By default, Roster uses the CLI bundled with the Claude Code extension.
+- The old `claudeCommand` setting is replaced by `claudeSwitch.claudePath`. By default, Claude Switch uses the CLI bundled with the Claude Code extension.
 
 ## 0.2.0
 
-- New Claude Roster tab in the activity bar. Click an account to switch to it, or hover for buttons to switch, rename or remove it.
+- New Claude Switch tab in the activity bar. Click an account to switch to it, or hover for buttons to switch, rename or remove it.
 - The tab shows a badge when an account needs a new sign-in or the window needs a reload.
 - New commands: Save Current Login and Refresh.
 

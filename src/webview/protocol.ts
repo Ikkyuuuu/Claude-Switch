@@ -35,7 +35,7 @@ export type RenewalView =
   /** Team and Enterprise plans, which the organization pays for. */
   | { kind: 'organization' };
 
-export interface RosterViewState {
+export interface SwitchViewState {
   /** macOS, where Claude Switch cannot work yet. */
   unsupported?: boolean;
   /** The live Claude login, matched against the saved accounts. */
@@ -139,7 +139,7 @@ export interface LogEntry {
 
 /** Extension to webview. */
 export type HostMessage =
-  | { type: 'state'; state: RosterViewState }
+  | { type: 'state'; state: SwitchViewState }
   /** The whole log, oldest first. */
   | { type: 'log'; entries: LogEntry[] }
   /** Show the log page, for "Claude Switch: Show Log" and "Show Log" buttons. */

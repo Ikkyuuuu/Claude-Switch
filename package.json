@@ -2,7 +2,7 @@
   "name": "claude-switch-accounts",
   "displayName": "Claude Switch (unofficial)",
   "description": "Switch which Claude account the Claude Code extension and CLI use. Not affiliated with Anthropic.",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "publisher": "wattanun42",
   "license": "MIT",
   "repository": {
@@ -39,108 +39,108 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "claudeRoster",
+          "id": "claudeSwitch",
           "title": "Claude Switch",
-          "icon": "resources/roster.svg"
+          "icon": "resources/switch.svg"
         }
       ]
     },
     "views": {
-      "claudeRoster": [
+      "claudeSwitch": [
         {
           "type": "webview",
-          "id": "claudeRoster.accounts",
+          "id": "claudeSwitch.accounts",
           "name": "Accounts",
-          "icon": "resources/roster.svg",
+          "icon": "resources/switch.svg",
           "contextualTitle": "Claude Switch"
         }
       ]
     },
     "commands": [
       {
-        "command": "claudeRoster.switch",
+        "command": "claudeSwitch.switch",
         "title": "Switch This Window's Account",
         "category": "Claude Switch",
         "icon": "$(arrow-swap)"
       },
       {
-        "command": "claudeRoster.switchAll",
+        "command": "claudeSwitch.switchAll",
         "title": "Switch All Windows",
         "category": "Claude Switch"
       },
       {
-        "command": "claudeRoster.add",
+        "command": "claudeSwitch.add",
         "title": "Add Account",
         "category": "Claude Switch",
         "icon": "$(add)"
       },
       {
-        "command": "claudeRoster.rename",
+        "command": "claudeSwitch.rename",
         "title": "Edit Account",
         "category": "Claude Switch",
         "icon": "$(edit)"
       },
       {
-        "command": "claudeRoster.remove",
+        "command": "claudeSwitch.remove",
         "title": "Remove Account",
         "category": "Claude Switch",
         "icon": "$(trash)"
       },
       {
-        "command": "claudeRoster.setRenewal",
+        "command": "claudeSwitch.setRenewal",
         "title": "Set Renewal Date",
         "category": "Claude Switch",
         "icon": "$(calendar)"
       },
       {
-        "command": "claudeRoster.saveCurrent",
+        "command": "claudeSwitch.saveCurrent",
         "title": "Save Current Login",
         "category": "Claude Switch",
         "icon": "$(save)"
       },
       {
-        "command": "claudeRoster.recapture",
+        "command": "claudeSwitch.recapture",
         "title": "Re-capture Current Login",
         "category": "Claude Switch"
       },
       {
-        "command": "claudeRoster.restore",
+        "command": "claudeSwitch.restore",
         "title": "Restore Last Backup",
         "category": "Claude Switch"
       },
       {
-        "command": "claudeRoster.refresh",
+        "command": "claudeSwitch.refresh",
         "title": "Refresh",
         "category": "Claude Switch",
         "icon": "$(refresh)"
       },
       {
-        "command": "claudeRoster.showLog",
+        "command": "claudeSwitch.showLog",
         "title": "Show Log",
         "category": "Claude Switch"
       },
       {
-        "command": "claudeRoster.forgetAll",
+        "command": "claudeSwitch.forgetAll",
         "title": "Remove All Saved Data",
         "category": "Claude Switch"
       },
       {
-        "command": "claudeRoster.signIn.openPage",
+        "command": "claudeSwitch.signIn.openPage",
         "title": "Open Sign-in Page",
         "category": "Claude Switch"
       },
       {
-        "command": "claudeRoster.signIn.copyLink",
+        "command": "claudeSwitch.signIn.copyLink",
         "title": "Copy Sign-in Link",
         "category": "Claude Switch"
       },
       {
-        "command": "claudeRoster.signIn.pasteCode",
+        "command": "claudeSwitch.signIn.pasteCode",
         "title": "Paste Sign-in Code",
         "category": "Claude Switch"
       },
       {
-        "command": "claudeRoster.signIn.cancel",
+        "command": "claudeSwitch.signIn.cancel",
         "title": "Cancel Sign-in",
         "category": "Claude Switch"
       }
@@ -148,83 +148,83 @@
     "menus": {
       "commandPalette": [
         {
-          "command": "claudeRoster.signIn.openPage",
-          "when": "claudeRoster.signingIn"
+          "command": "claudeSwitch.signIn.openPage",
+          "when": "claudeSwitch.signingIn"
         },
         {
-          "command": "claudeRoster.signIn.copyLink",
-          "when": "claudeRoster.signingIn"
+          "command": "claudeSwitch.signIn.copyLink",
+          "when": "claudeSwitch.signingIn"
         },
         {
-          "command": "claudeRoster.signIn.pasteCode",
-          "when": "claudeRoster.signingIn"
+          "command": "claudeSwitch.signIn.pasteCode",
+          "when": "claudeSwitch.signingIn"
         },
         {
-          "command": "claudeRoster.signIn.cancel",
-          "when": "claudeRoster.signingIn"
+          "command": "claudeSwitch.signIn.cancel",
+          "when": "claudeSwitch.signingIn"
         }
       ],
       "view/title": [
         {
-          "command": "claudeRoster.add",
-          "when": "view == claudeRoster.accounts",
+          "command": "claudeSwitch.add",
+          "when": "view == claudeSwitch.accounts",
           "group": "navigation@1"
         },
         {
-          "command": "claudeRoster.refresh",
-          "when": "view == claudeRoster.accounts",
+          "command": "claudeSwitch.refresh",
+          "when": "view == claudeSwitch.accounts",
           "group": "navigation@2"
         },
         {
-          "command": "claudeRoster.switchAll",
-          "when": "view == claudeRoster.accounts",
+          "command": "claudeSwitch.switchAll",
+          "when": "view == claudeSwitch.accounts",
           "group": "0_switch@1"
         },
         {
-          "command": "claudeRoster.recapture",
-          "when": "view == claudeRoster.accounts",
+          "command": "claudeSwitch.recapture",
+          "when": "view == claudeSwitch.accounts",
           "group": "1_login@1"
         },
         {
-          "command": "claudeRoster.restore",
-          "when": "view == claudeRoster.accounts",
+          "command": "claudeSwitch.restore",
+          "when": "view == claudeSwitch.accounts",
           "group": "1_login@2"
         },
         {
-          "command": "claudeRoster.showLog",
-          "when": "view == claudeRoster.accounts",
+          "command": "claudeSwitch.showLog",
+          "when": "view == claudeSwitch.accounts",
           "group": "2_log@1"
         },
         {
-          "command": "claudeRoster.forgetAll",
-          "when": "view == claudeRoster.accounts",
+          "command": "claudeSwitch.forgetAll",
+          "when": "view == claudeSwitch.accounts",
           "group": "3_data@1"
         }
       ],
       "webview/context": [
         {
-          "command": "claudeRoster.switch",
-          "when": "webviewId == 'claudeRoster.accounts' && webviewSection == 'profile'",
+          "command": "claudeSwitch.switch",
+          "when": "webviewId == 'claudeSwitch.accounts' && webviewSection == 'profile'",
           "group": "1_switch@1"
         },
         {
-          "command": "claudeRoster.switchAll",
-          "when": "webviewId == 'claudeRoster.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
+          "command": "claudeSwitch.switchAll",
+          "when": "webviewId == 'claudeSwitch.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
           "group": "1_switch@2"
         },
         {
-          "command": "claudeRoster.rename",
-          "when": "webviewId == 'claudeRoster.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
+          "command": "claudeSwitch.rename",
+          "when": "webviewId == 'claudeSwitch.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
           "group": "2_edit@1"
         },
         {
-          "command": "claudeRoster.remove",
-          "when": "webviewId == 'claudeRoster.accounts' && webviewSection == 'profile'",
+          "command": "claudeSwitch.remove",
+          "when": "webviewId == 'claudeSwitch.accounts' && webviewSection == 'profile'",
           "group": "2_edit@2"
         },
         {
-          "command": "claudeRoster.setRenewal",
-          "when": "webviewId == 'claudeRoster.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
+          "command": "claudeSwitch.setRenewal",
+          "when": "webviewId == 'claudeSwitch.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
           "group": "2_edit@3"
         }
       ]
@@ -232,19 +232,19 @@
     "configuration": {
       "title": "Claude Switch",
       "properties": {
-        "claudeRoster.claudePath": {
+        "claudeSwitch.claudePath": {
           "type": "string",
           "default": "",
           "scope": "machine",
           "markdownDescription": "Path to the Claude Code CLI that Claude Switch runs: to sign in with **Add Account**, and for usage checks. Leave empty to use the CLI bundled with the Claude Code extension, or `claude` on PATH. User settings only; workspace settings cannot change it."
         },
-        "claudeRoster.confirmBeforeSwitch": {
+        "claudeSwitch.confirmBeforeSwitch": {
           "type": "boolean",
           "default": true,
           "scope": "application",
-          "markdownDescription": "Ask for confirmation before switching accounts when `#claudeRoster.switchMode#` restarts extensions or reloads the window. Instant switches never ask."
+          "markdownDescription": "Ask for confirmation before switching accounts when `#claudeSwitch.switchMode#` restarts extensions or reloads the window. Instant switches never ask."
         },
-        "claudeRoster.switchMode": {
+        "claudeSwitch.switchMode": {
           "type": "string",
           "default": "reloadWindow",
           "enum": [
@@ -262,19 +262,19 @@
           "scope": "application",
           "markdownDescription": "What happens in the window that switches, after a switch (other windows keep their accounts unless you use **Switch All Windows**). By default the window reloads, so no Claude Code conversation is left running on the old account. The instant modes are faster, but conversations and terminals that were already open keep the old account until you start new ones."
         },
-        "claudeRoster.usageCheckSeconds": {
+        "claudeSwitch.usageCheckSeconds": {
           "type": "number",
           "default": 60,
           "minimum": 0,
           "scope": "application",
           "markdownDescription": "How often, in seconds, Claude Switch asks Claude Code for the current usage of this window's account while Claude is idle. A few seconds after Claude replies, in any window, it checks anyway, so the numbers follow your use; this setting catches usage elsewhere, such as on claude.ai. The VS Code window you are in does the checks, for the account that replied, and every window shows the result. Claude Code's own CLI fetches the numbers, the way its Account & Usage panel does; Claude Switch never handles your token or makes the request itself. If a check fails, for example because Anthropic is limiting requests, the next one waits longer. `0` turns usage checks off; values below 10 count as 10."
         },
-        "claudeRoster.autoRefreshSeconds": {
+        "claudeSwitch.autoRefreshSeconds": {
           "type": "number",
           "default": 1,
           "minimum": 0,
           "scope": "application",
-          "markdownDescription": "How often, in seconds, the Claude Switch tab and status bar re-read the login while the window is focused, so a switch in another window or a `/login` shows at once. These are local file reads; nothing is sent over the network. Usage is checked separately, see `#claudeRoster.usageCheckSeconds#`. `0` turns auto-refresh off."
+          "markdownDescription": "How often, in seconds, the Claude Switch tab and status bar re-read the login while the window is focused, so a switch in another window or a `/login` shows at once. These are local file reads; nothing is sent over the network. Usage is checked separately, see `#claudeSwitch.usageCheckSeconds#`. `0` turns auto-refresh off."
         }
       }
     }
