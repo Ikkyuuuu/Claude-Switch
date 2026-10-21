@@ -10,7 +10,7 @@ import { ProfileMeta, ProfileStore } from './profileStore';
 import { RosterLog } from './rosterLog';
 import { RosterStatusBar } from './statusBar';
 import { LiveState, LockBusyError, SwitchEngine } from './switchEngine';
-import { askClaudeForUsage, forgetSavedUsage, UsageCheckOptions } from './usageCheck';
+import { askClaudeForUsage, forgetSavedUsage, UsageCheckOptions, usageCheckDue } from './usageCheck';
 import { LOGIN_DIR_VARIABLE, LoginFolders } from './windowAccounts';
 import { MAX_ALIAS_LENGTH } from './webview/rules';
 import { colourOf } from './viewModel';
@@ -61,9 +61,13 @@ const REFRESH_THROTTLE_MS = 30_000;
  */
 type SwitchMode = 'newConversation' | 'instant' | 'restartExtensions' | 'reloadWindow';
 
-/** 0 means off. Each check starts the Claude CLI for a second or two, so not more often than every 10 seconds. */
+/**
+ * How often to check usage while Claude is idle; after Claude replies, checks
+ * come sooner (see usageCheckDue). 0 means no checks at all. Each check starts
+ * the Claude CLI for a few seconds, so not more often than every 10 seconds.
+ */
 function usageCheckSeconds(): number {
-  const seconds = vscode.workspace.getConfiguration('claudeRoster').get<number>('usageCheckSeconds', 10);
+  const seconds = vscode.workspace.getConfiguration('claudeRoster').get<number>('usageCheckSeconds', 60);
   return Number.isFinite(seconds) && seconds > 0 ? Math.max(10, seconds) : 0;
 }
 
@@ -129,6 +133,9 @@ export class RosterController implements vscode.Disposable {
   /** Failed usage checks in a row, and when to try again: Anthropic may be limiting requests. */
   private usageFailures = 0;
   private usageRetryAt = 0;
+  /** When Claude was first used since the last usage check (0: not since), and last used. */
+  private activitySince = 0;
+  private lastActivity = 0;
 
   // Integration tests replace these three, since the test window must not reload or restart.
   reloadWindow: () => Thenable<unknown> = () => vscode.commands.executeCommand('workbench.action.reloadWindow');
@@ -348,21 +355,35 @@ export class RosterController implements vscode.Disposable {
     );
   }
 
+  /** Claude was just used, in some window: its usage numbers are about to change. See ClaudeActivity. */
+  noteClaudeActivity(): void {
+    const now = Date.now();
+    this.activitySince ||= now;
+    this.lastActivity = now;
+  }
+
   /**
-   * Claude Code saves usage to .claude.json only now and then, so every
-   * claudeRoster.usageCheckSeconds, while the tab shows and the window is
-   * focused, ask Claude for the current numbers.
+   * Claude Code saves usage to .claude.json only now and then, so while the
+   * tab shows and the window is focused, ask Claude for the current numbers:
+   * shortly after it replies, and every claudeRoster.usageCheckSeconds otherwise.
    */
   checkUsageIfDue(): void {
     const seconds = usageCheckSeconds();
+    const now = Date.now();
     if (
       seconds &&
       !this.usageCheck &&
       this.windowLive.kind === 'known' &&
       this.view.visible &&
       vscode.window.state.focused &&
-      Date.now() - this.lastUsageCheck >= seconds * 1000 &&
-      Date.now() >= this.usageRetryAt
+      now >= this.usageRetryAt &&
+      usageCheckDue({
+        now,
+        lastCheck: this.lastUsageCheck,
+        intervalMs: seconds * 1000,
+        activitySince: this.activitySince,
+        lastActivity: this.lastActivity,
+      })
     ) {
       void this.checkUsage();
     }
@@ -378,6 +399,8 @@ export class RosterController implements vscode.Disposable {
 
   private async runUsageCheck(): Promise<void> {
     this.lastUsageCheck = Date.now();
+    // This check covers what Claude did until now.
+    this.activitySince = 0;
     if (this.windowLive.kind !== 'known') {
       return;
     }

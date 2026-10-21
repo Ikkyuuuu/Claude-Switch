@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AccountsView } from './accountsView';
+import { ClaudeActivity } from './claudeActivity';
 import { ClaudePaths, resolvePaths } from './claudeFiles';
 import { RosterController, SwitchArgs, WindowContext } from './commands';
 import { ProfileStore } from './profileStore';
@@ -171,6 +172,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Roster
       }
     }),
   );
+
+  // Usage is checked shortly after Claude replies, in any window.
+  const activity = new ClaudeActivity(paths.configDir, () => controller.noteClaudeActivity());
+  activity.start();
+  context.subscriptions.push(activity);
 
   log.info(`Claude login files: ${paths.credentialsFile} and ${paths.globalConfigFile}`);
   warnAboutConfigDir(context, paths, log, view);

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.0
+
+- **Usage follows your use.** Claude Switch checks usage a few seconds after Claude replies, in any window, instead of on a fixed timer: once a reply has finished, or every 10 seconds during a long one, and never two checks within 5 seconds. It notices replies by watching for changes to Claude Code's conversation files under `~/.claude/projects`, without reading them.
+- While Claude is idle, usage is checked every minute again (`claudeRoster.usageCheckSeconds`, now 60 by default), to catch usage on claude.ai or another computer. Fewer requests overall, and none while you are not using Claude.
+
 ## 0.11.3
 
 - The tab and status bar re-read the login every second (`claudeRoster.autoRefreshSeconds`, now 1 by default), so a switch in another window or a `/login` shows within a second. These are local file reads.

@@ -11,7 +11,7 @@ Switch which Claude account the **Claude Code VS Code extension** uses, and with
 ## Highlights
 
 - **An account per window.** Work in one VS Code window, personal in another; each project remembers its account.
-- **Usage at a glance.** Session and weekly limits for every account, refreshed every 10 seconds, turning yellow at 70% and red at 80%.
+- **Usage at a glance.** Session and weekly limits for every account, updated a few seconds after each Claude reply, turning yellow at 70% and red at 80%.
 - **Add accounts without a terminal.** Sign in through the browser from the tab; your current login is not touched.
 - **Careful with your login.** Saved logins stay encrypted, every switch is checked and rolled back on failure, and the extension makes no network calls of its own.
 
@@ -84,7 +84,7 @@ On first start, Claude Switch finds the account you are signed in to and shows i
 Each account card shows the account's plan (for example Team, Pro or Max 20x), its usage and its renewal date.
 
 - **Usage:** this window's account shows meters for the 5-hour session and the weekly limit, with their reset times; a limit that resets within the hour counts down, for example "Resets in 23 minutes". These are the same numbers as `/usage` in Claude Code. Meters are blue, turn yellow from 70% and red from 80%.
-- **Where the numbers come from:** every 10 seconds while the tab is open and the window is focused, Claude Switch asks Claude Code's own CLI for the current usage, the same way Claude Code's Account & Usage panel asks it. The CLI fetches the numbers from Anthropic with its own login; Claude Switch never handles your token or makes the request itself. The CLI runs in safe mode, so your hooks, plugins, MCP servers and CLAUDE.md files are not loaded, and it saves no conversation. Each check takes a few seconds, and gets fresh numbers: Claude Switch clears the ones the CLI saved in its own settings folder, which it would otherwise reuse for a minute. If a check fails, for example because Anthropic is limiting requests, the next one waits longer.
+- **Where the numbers come from:** a few seconds after Claude replies, in any window, and every minute while Claude is idle, Claude Switch asks Claude Code's own CLI for the current usage of this window's account (while the tab is open and the window is focused), the same way Claude Code's Account & Usage panel asks it. The CLI fetches the numbers from Anthropic with its own login; Claude Switch never handles your token or makes the request itself. The CLI runs in safe mode, so your hooks, plugins, MCP servers and CLAUDE.md files are not loaded, and it saves no conversation. To know when Claude replied, Claude Switch watches for changes to the conversation files Claude Code keeps under `~/.claude/projects`; it never reads them. Each check takes a few seconds, and gets fresh numbers: Claude Switch clears the ones the CLI saved in its own settings folder, which it would otherwise reuse for a minute. If a check fails, for example because Anthropic is limiting requests, the next one waits longer.
 - Between checks, and if `claudeRoster.usageCheckSeconds` is `0`, Claude Switch shows the numbers Claude Code last saved in `.claude.json`, re-read every second (see `claudeRoster.autoRefreshSeconds`). Those can be several minutes old, and while windows use different accounts they are not used at all, because Claude labels them with the default account.
 - **Other accounts:** show the session and weekly numbers from when each was last active, with reset times and how old the numbers are. A limit whose reset time has passed shows as **reset**.
 - **Renewal:**
@@ -158,7 +158,7 @@ The last two are fastest, because Claude Code reads the login each time a conver
 | A Claude conversation still uses the previous account | Conversations started before the switch keep their account. Start a new conversation, or reload the window (the default `switchMode` does this for you). |
 | A terminal still uses the previous account | Terminals opened before the switch keep their account; VS Code marks them with a warning icon. Open a new terminal. |
 | "The saved login has expired" | Choose **Sign in again**, or **Add Account** with the same email: the new sign-in replaces the saved one, and windows that use the account get it too. |
-| Usage numbers look old | Usage is checked every 10 seconds while the tab is open and the window is focused (`claudeRoster.usageCheckSeconds`). The **Activity log** says if a check failed; after a failure the checks slow down for a while. |
+| Usage numbers look old | Usage is checked a few seconds after Claude replies, and every minute while it is idle (`claudeRoster.usageCheckSeconds`), while the tab is open and the window is focused. Usage on claude.ai or another computer shows at the next idle check. The **Activity log** says if a check failed; after a failure the checks slow down for a while. |
 | The tab keeps showing "Loading…" | Run **Developer: Reload Window**. If it happens again, open the **Activity log** (or the "Claude Switch" Output channel) and include it in a bug report. |
 | You want to start over | **Remove All Saved Data** in the **⋯** menu deletes every saved account, login folder and backup. Your login in `~/.claude` stays. |
 
@@ -173,6 +173,7 @@ Claude Switch reads and writes **only** these files:
 | `%USERPROFILE%\.claude\.credentials.json` (or in `$CLAUDE_CONFIG_DIR`, or in `$CLAUDE_SECURESTORAGE_CONFIG_DIR` if you set it) | Read, replace | Claude Code's login tokens. Replaced as a whole on a switch. |
 | `%USERPROFILE%\.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`) | Read, patch | Only the `oauthAccount` key (the signed-in identity) is changed. Every other key, the indentation and the line endings are kept. Claude Switch also reads `cachedUsageUtilization` (Claude Code's `/usage` cache) to show usage; it never writes that key. |
 | `<file>.roster-<random>.tmp` next to each file above | Create, rename | Writes go to a temp file first, which is then renamed over the target, so a file is never half-written. |
+| `%USERPROFILE%\.claude\projects\` (or in `$CLAUDE_CONFIG_DIR`) | Watch only | Claude Switch notices when Claude Code writes a conversation there, to check usage right after a reply. It never opens or reads these files. |
 | `%TEMP%\claude-roster-login-<random>\` | Create, delete | Isolated sign-in folder for **Add Account**. Deleted right after the login is captured. Claude Switch refuses to delete any other path. |
 | VS Code global storage for this extension: `switch-signal.json`, `switch.lock` | Create, write | Tells other windows about a switch, and stops two windows from switching at the same time. Contains no secrets. |
 | Global storage: `logins/<account>/.credentials.json` | Create, read, delete | The login of an account that some window uses while it is not the default account, where that window's Claude reads it. Removed, after its newest tokens are saved, when the account becomes the default, and a day after no window uses it. |
@@ -217,7 +218,7 @@ Note that `.credentials.json` can also hold sign-ins for MCP servers. Because th
 | `claudeRoster.claudePath` | *(empty)* | Path to the Claude Code CLI that **Add Account** uses. Empty means the CLI bundled with the Claude Code extension, else `claude` on PATH. Machine scope. |
 | `claudeRoster.switchMode` | `reloadWindow` | What happens after a switch: `reloadWindow`, `restartExtensions`, `newConversation` or `instant`. See [Switching](#switching). |
 | `claudeRoster.confirmBeforeSwitch` | `true` | Ask before switching in the `restartExtensions` and `reloadWindow` modes. Instant switches never ask. |
-| `claudeRoster.usageCheckSeconds` | `10` | How often to ask Claude Code's CLI for the current usage of this window's account, while the tab is open and the window is focused. Each check starts the CLI for a few seconds; raise it to check less often. `0` turns it off; the minimum is 10. |
+| `claudeRoster.usageCheckSeconds` | `60` | How often to check usage while Claude is idle; after Claude replies, Claude Switch checks within a few seconds anyway. Each check starts Claude Code's CLI for a few seconds. `0` turns usage checks off; the minimum is 10. |
 | `claudeRoster.autoRefreshSeconds` | `1` | How often the tab and status bar re-read the login while the window is focused, so a switch in another window or a `/login` shows at once. Local file reads only. `0` turns it off. |
 
 If `CLAUDE_CONFIG_DIR` is set, Claude Switch switches the login in that folder and warns you once, because the Claude Code VS Code extension has been reported to ignore that variable.

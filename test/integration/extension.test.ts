@@ -1,4 +1,5 @@
 import * as assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ClaudeLogin } from '../../src/addAccount';
@@ -248,6 +249,24 @@ suite('Claude Switch in VS Code', () => {
     assert.equal(api.store.get(work.id)?.usage?.session?.percent, 87, "the default account's numbers stay");
 
     await api.controller.switchAccount({ profileId: work.id });
+  });
+
+  test('notices Claude replying, to check usage right after', async () => {
+    let noticed = 0;
+    const note = api.controller.noteClaudeActivity.bind(api.controller);
+    api.controller.noteClaudeActivity = () => {
+      noticed++;
+      note();
+    };
+    try {
+      // What Claude Code does for each message of a conversation.
+      const project = path.join(api.paths.configDir, 'projects', 'c--work-my-app');
+      await fs.mkdir(project, { recursive: true });
+      await fs.appendFile(path.join(project, 'a1b2.jsonl'), '{"type":"assistant"}\n');
+      await waitFor(async () => (noticed > 0 ? true : undefined), 10_000);
+    } finally {
+      api.controller.noteClaudeActivity = note;
+    }
   });
 
   test('switches once however many times an account is clicked', async () => {

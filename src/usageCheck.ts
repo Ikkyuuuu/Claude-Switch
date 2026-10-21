@@ -127,6 +127,40 @@ export function askClaudeForUsage(options: UsageCheckOptions): Promise<unknown> 
   });
 }
 
+/** A reply has finished once Claude's conversation file has been still this long. */
+export const ACTIVITY_QUIET_MS = 2_000;
+/** During a long reply, check this often. */
+export const ACTIVITY_MAX_WAIT_MS = 10_000;
+/** Never two checks closer together than this. */
+export const ACTIVITY_MIN_GAP_MS = 5_000;
+
+export interface UsageSchedule {
+  now: number;
+  lastCheck: number;
+  /** The check while Claude is idle, from claudeRoster.usageCheckSeconds. */
+  intervalMs: number;
+  /** When Claude was first used since the last check; 0 if it wasn't. */
+  activitySince: number;
+  /** When Claude was last used. */
+  lastActivity: number;
+}
+
+/**
+ * Whether to check usage now: shortly after Claude replies, when the numbers
+ * change, and otherwise every intervalMs, for usage elsewhere such as claude.ai.
+ */
+export function usageCheckDue(s: UsageSchedule): boolean {
+  const sinceCheck = s.now - s.lastCheck;
+  if (s.activitySince && sinceCheck >= ACTIVITY_MIN_GAP_MS) {
+    const replyFinished = s.now - s.lastActivity >= ACTIVITY_QUIET_MS;
+    const longReply = s.now - s.activitySince >= ACTIVITY_MAX_WAIT_MS;
+    if (replyFinished || longReply) {
+      return true;
+    }
+  }
+  return sinceCheck >= s.intervalMs;
+}
+
 /**
  * Clears the usage numbers the CLI saved in a usage check's own settings
  * folder (its CLAUDE_CONFIG_DIR, never ~/.claude). The CLI reuses numbers
