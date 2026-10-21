@@ -2,6 +2,7 @@
 
 ## 0.14.2
 
+- The Marketplace lists the extension as **Claude Switch - Account per Window**: another extension already has the name Claude Switch. Inside VS Code it is still called Claude Switch.
 - Fixed: clicking the **Switch** label that appears on an account when you point at it did nothing, nor did clicking just left of it, so it took a second click elsewhere on the account to switch. The whole account now switches, apart from its Edit and Remove buttons.
 - The question before switching this window now appears as soon as you click, instead of up to a second later, and the account list dims at once to show the click landed. Claude's login files are checked in the background while you read it, so **Switch and reload** doesn't wait for them either. Nothing changes unless that check passes.
 - Fixed: two windows could hold the switch lock at once. When the lock was released at the moment another window found it taken, that window deleted the lock a third window had just taken, so a switch could run alongside a usage check, folder update or another switch.
