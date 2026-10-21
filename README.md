@@ -1,8 +1,8 @@
-# Claude Switch (unofficial)
+# Claude Switch
 
 Switch which Claude account the **Claude Code VS Code extension** uses, and with it the `claude` CLI in VS Code's terminal. **Each VS Code window can use its own account**: work in one window, personal in another.
 
-> **Unofficial.** This extension is not made, endorsed or supported by Anthropic. It works by swapping Claude Code's internal login files, so a Claude Code update can stop it from working. When that happens it refuses to switch instead of guessing.
+> **Not affiliated with Anthropic.** This extension is not made, endorsed or supported by Anthropic. It works by swapping Claude Code's internal login files, so a Claude Code update can stop it from working. When that happens it refuses to switch instead of guessing.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Ikkyuuuu/Claude-Switch/main/images/accounts.png" width="340" alt="The Claude Switch tab: this window's account with its session and weekly usage meters, and two other accounts to switch to">
@@ -20,7 +20,7 @@ Switch which Claude account the **Claude Code VS Code extension** uses, and with
 Search for **Claude Switch** in the Extensions view (`Ctrl+Shift+X`) and click **Install**:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Ikkyuuuu/Claude-Switch/main/images/install.png" width="435" alt="Claude Switch (unofficial) by Wattanun Teeratanapong in the VS Code Extensions view, with its Install button">
+  <img src="https://raw.githubusercontent.com/Ikkyuuuu/Claude-Switch/main/images/install.png" width="435" alt="Claude Switch by Wattanun Teeratanapong in the VS Code Extensions view, with its Install button">
 </p>
 
 Or press `Ctrl+P` and run `ext install wattanun42.claude-switch-accounts`.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14.1
+
+- The Marketplace lists the extension as just **Claude Switch**. Its description still says it is not affiliated with Anthropic.
+
 ## 0.14.0
 
 - **One name everywhere.** Settings, commands and the tab now go by Claude Switch inside too, under `claudeSwitch.*`, as do the files Claude Switch makes. Nothing to do on your part:
