@@ -10,7 +10,7 @@ import { ProfileMeta, ProfileStore } from './profileStore';
 import { RosterLog } from './rosterLog';
 import { RosterStatusBar } from './statusBar';
 import { LiveState, LockBusyError, SwitchEngine } from './switchEngine';
-import { askClaudeForUsage, UsageCheckOptions } from './usageCheck';
+import { askClaudeForUsage, forgetSavedUsage, UsageCheckOptions } from './usageCheck';
 import { LOGIN_DIR_VARIABLE, LoginFolders } from './windowAccounts';
 import { MAX_ALIAS_LENGTH } from './webview/rules';
 import { colourOf } from './viewModel';
@@ -41,7 +41,10 @@ export interface WindowContext {
 
 const DAY_MS = 24 * 60 * 60_000;
 /** How often to see whether a usage check is due. */
-const USAGE_TICK_MS = 15_000;
+const USAGE_TICK_MS = 5_000;
+/** After a failed usage check, the wait before the next, doubling each time up to USAGE_BACKOFF_MAX_MS. */
+const USAGE_BACKOFF_MS = 30_000;
+const USAGE_BACKOFF_MAX_MS = 10 * 60_000;
 /** After asking for a reload: if the window is still here this much later, it is not reloading. */
 const RELOAD_GIVE_UP_MS = 5_000;
 
@@ -58,10 +61,10 @@ const REFRESH_THROTTLE_MS = 30_000;
  */
 type SwitchMode = 'newConversation' | 'instant' | 'restartExtensions' | 'reloadWindow';
 
-/** 0 means off. Claude reuses usage numbers younger than a minute, so checking more often would not help. */
+/** 0 means off. Each check starts the Claude CLI for a second or two, so not more often than every 10 seconds. */
 function usageCheckSeconds(): number {
-  const seconds = vscode.workspace.getConfiguration('claudeRoster').get<number>('usageCheckSeconds', 60);
-  return Number.isFinite(seconds) && seconds > 0 ? Math.max(60, seconds) : 0;
+  const seconds = vscode.workspace.getConfiguration('claudeRoster').get<number>('usageCheckSeconds', 10);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.max(10, seconds) : 0;
 }
 
 function switchMode(): SwitchMode {
@@ -123,7 +126,9 @@ export class RosterController implements vscode.Disposable {
   private addingAccount = false;
   private usageCheck: Promise<void> | undefined;
   private lastUsageCheck = 0;
-  private usageCheckFailed = false;
+  /** Failed usage checks in a row, and when to try again: Anthropic may be limiting requests. */
+  private usageFailures = 0;
+  private usageRetryAt = 0;
 
   // Integration tests replace these three, since the test window must not reload or restart.
   reloadWindow: () => Thenable<unknown> = () => vscode.commands.executeCommand('workbench.action.reloadWindow');
@@ -356,7 +361,8 @@ export class RosterController implements vscode.Disposable {
       this.windowLive.kind === 'known' &&
       this.view.visible &&
       vscode.window.state.focused &&
-      Date.now() - this.lastUsageCheck >= seconds * 1000
+      Date.now() - this.lastUsageCheck >= seconds * 1000 &&
+      Date.now() >= this.usageRetryAt
     ) {
       void this.checkUsage();
     }
@@ -388,16 +394,23 @@ export class RosterController implements vscode.Disposable {
         CLAUDE_CONFIG_DIR: configDir,
         [LOGIN_DIR_VARIABLE]: folderId ? this.window.folders.dirOf(folderId) : this.window.defaultLoginDir,
       };
+      // Fresh numbers each time: the CLI would reuse the ones it saved there for a minute.
+      await forgetSavedUsage(configDir);
       const updated = await this.engine.checkUsage(() => this.askUsage({ command: claude.command, cwd: this.storageDir, env }), folderId);
-      this.usageCheckFailed = false;
+      this.usageFailures = 0;
+      this.usageRetryAt = 0;
       if (updated) {
         await this.refresh();
       }
     } catch (err) {
       // Busy: a switch is running, in this window or another. Try again next time.
-      if (!(err instanceof LockBusyError) && !this.usageCheckFailed) {
-        this.usageCheckFailed = true;
-        this.log.warn(`Could not get the current usage from Claude, so the tab shows the numbers Claude Code last saved: ${errorMessage(err)}`);
+      if (err instanceof LockBusyError) {
+        return;
+      }
+      this.usageFailures++;
+      this.usageRetryAt = Date.now() + Math.min(USAGE_BACKOFF_MAX_MS, USAGE_BACKOFF_MS * 2 ** (this.usageFailures - 1));
+      if (this.usageFailures === 1) {
+        this.log.warn(`Could not get the current usage from Claude, so the tab shows the numbers it had: ${errorMessage(err)}. Trying again in a while.`);
       }
     }
   }

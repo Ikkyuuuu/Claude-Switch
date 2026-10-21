@@ -1,6 +1,8 @@
 import { ChildProcess, execFile, spawn } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
 import { withoutAuthOverrides } from './addAccount';
-import { errorCode } from './claudeFiles';
+import { atomicWrite, errorCode } from './claudeFiles';
 
 export interface UsageCheckOptions {
   /** Claude Code CLI executable. */
@@ -123,6 +125,29 @@ export function askClaudeForUsage(options: UsageCheckOptions): Promise<unknown> 
     });
     send('init', { subtype: 'initialize' });
   });
+}
+
+/**
+ * Clears the usage numbers the CLI saved in a usage check's own settings
+ * folder (its CLAUDE_CONFIG_DIR, never ~/.claude). The CLI reuses numbers
+ * younger than a minute; with none saved, it fetches fresh ones.
+ */
+export async function forgetSavedUsage(configDir: string): Promise<void> {
+  const file = path.join(configDir, '.claude.json');
+  let config: unknown;
+  try {
+    config = JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch (err) {
+    if (errorCode(err) !== 'ENOENT') {
+      // Unreadable: the CLI starts the folder afresh.
+      await fs.rm(file, { force: true });
+    }
+    return;
+  }
+  if (typeof config === 'object' && config !== null && 'cachedUsageUtilization' in config) {
+    delete (config as Record<string, unknown>).cachedUsageUtilization;
+    await atomicWrite(file, JSON.stringify(config, null, 2));
+  }
 }
 
 function controlResponse(line: string): { request_id?: unknown; subtype?: unknown; response?: unknown } | undefined {

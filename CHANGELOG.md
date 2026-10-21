@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.2
+
+- Usage is checked every 10 seconds instead of every minute (`claudeRoster.usageCheckSeconds`, now 10 by default and at least 10). Each check gets fresh numbers: Claude Switch clears the ones the CLI saved in the check's own settings folder, which it would otherwise reuse for a minute.
+- After a failed usage check, for example when Anthropic limits requests, the next one waits longer: 30 seconds, doubling up to 10 minutes.
+
 ## 0.11.1
 
 Bug fixes and polish.

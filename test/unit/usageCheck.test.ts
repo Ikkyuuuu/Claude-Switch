@@ -1,8 +1,9 @@
 import * as assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { usageFromUtilization } from '../../src/accountDetails';
-import { askClaudeForUsage, UsageCheckOptions } from '../../src/usageCheck';
+import { askClaudeForUsage, forgetSavedUsage, UsageCheckOptions } from '../../src/usageCheck';
 
 const FAKE_CLAUDE = path.join(__dirname, '..', 'fakeClaude.js');
 const RATE_LIMITS = {
@@ -43,5 +44,25 @@ suite('askClaudeForUsage', () => {
 
   test('reports a missing CLI', async () => {
     await assert.rejects(askClaudeForUsage({ command: path.join(os.tmpdir(), 'no-such-claude.exe'), cwd: os.tmpdir() }), /Could not find the Claude Code CLI/);
+  });
+});
+
+suite('forgetSavedUsage', () => {
+  test("clears only the saved usage in a usage check's own settings folder", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roster-usage-'));
+    try {
+      const file = path.join(dir, '.claude.json');
+      // Nothing saved yet: nothing to do.
+      await forgetSavedUsage(dir);
+      await fs.writeFile(file, JSON.stringify({ numStartups: 3, cachedUsageUtilization: { fetchedAtMs: 1, utilization: RATE_LIMITS } }));
+      await forgetSavedUsage(dir);
+      assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { numStartups: 3 });
+      // Unreadable: removed, so the CLI starts the folder afresh.
+      await fs.writeFile(file, '{ not json');
+      await forgetSavedUsage(dir);
+      await assert.rejects(fs.access(file));
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
