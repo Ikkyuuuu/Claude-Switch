@@ -896,7 +896,7 @@ function usagePanel(a: AccountCard): HTMLElement {
     h(
       'div',
       { class: 'details-foot' },
-      h('span', {}, `Updated ${ago(a.usage.updatedAt)}`),
+      h('span', { 'data-ago': String(a.usage.updatedAt), 'data-prefix': 'Updated' }, `Updated ${ago(a.usage.updatedAt)}`),
     ),
   );
 }
@@ -978,12 +978,15 @@ function miniUsage(a: AccountCard): HTMLElement | null {
       !reset && m.resetsAt ? h('span', { class: 'mini-reset', 'data-resets': m.resetsAt, 'data-prefix': 'resets' }, resetText(m.resetsAt, 'resets')) : null,
     );
   });
-  const foot = [
-    a.usage ? `as of ${ago(a.usage.updatedAt)}` : undefined,
-    a.renewal?.kind === 'date' ? `renews ${formatDate(a.renewal.date)}` : undefined,
-  ].filter(Boolean);
+  const foot: Node[] = [];
+  if (a.usage) {
+    foot.push(h('span', { 'data-ago': String(a.usage.updatedAt), 'data-prefix': 'as of' }, `as of ${ago(a.usage.updatedAt)}`));
+  }
+  if (a.renewal?.kind === 'date') {
+    foot.push(document.createTextNode(`renews ${formatDate(a.renewal.date)}`));
+  }
   if (foot.length) {
-    lines.push(h('div', { class: 'mini-foot' }, foot.join(' · ')));
+    lines.push(h('div', { class: 'mini-foot' }, ...foot.flatMap((node, i) => (i ? [' · ', node] : [node]))));
   }
   return lines.length ? h('div', { class: 'minis' }, ...lines) : null;
 }
@@ -1228,16 +1231,19 @@ watchSlowLoading();
 render();
 vscode.postMessage({ type: 'ready' });
 
-// Keeps "Updated 5 minutes ago" and reset times current, without disturbing focus or typing.
+// Every minute, the rest of the tab catches up with the time too: a limit whose reset passed, renewal days.
 setInterval(() => {
   if (state && !app.contains(document.activeElement)) {
     render();
   }
 }, 60_000);
 
-// "Resets in 23 minutes" counts down in place, even while focus is in the tab.
+// Every second, "Resets in 23 minutes" and "Updated 5 minutes ago" update in place, even while focus is in the tab.
 setInterval(() => {
   for (const span of app.querySelectorAll<HTMLElement>('[data-resets]')) {
     span.textContent = resetText(span.dataset.resets ?? '', span.dataset.prefix);
   }
-}, 15_000);
+  for (const span of app.querySelectorAll<HTMLElement>('[data-ago]')) {
+    span.textContent = `${span.dataset.prefix} ${ago(Number(span.dataset.ago))}`;
+  }
+}, 1_000);

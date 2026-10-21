@@ -49,7 +49,7 @@ export interface WaitForLoginOptions {
  * a row agree, so a sign-in that is still being written is never captured.
  */
 export async function waitForLogin(dir: string, options: WaitForLoginOptions = {}): Promise<SavedLogin> {
-  const { intervalMs = 2000, timeoutMs = 15 * 60_000, signal } = options;
+  const { intervalMs = 1000, timeoutMs = 15 * 60_000, signal } = options;
   const paths = resolvePaths({ CLAUDE_CONFIG_DIR: dir });
   const deadline = Date.now() + timeoutMs;
   let previous: SavedLogin | undefined;

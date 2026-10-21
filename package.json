@@ -2,7 +2,7 @@
   "name": "claude-switch-accounts",
   "displayName": "Claude Switch (unofficial)",
   "description": "Switch which Claude account the Claude Code extension and CLI use. Not affiliated with Anthropic.",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "publisher": "wattanun42",
   "license": "MIT",
   "repository": {
@@ -271,10 +271,10 @@
         },
         "claudeRoster.autoRefreshSeconds": {
           "type": "number",
-          "default": 10,
+          "default": 1,
           "minimum": 0,
           "scope": "application",
-          "markdownDescription": "How often, in seconds, the Claude Switch tab and status bar re-read the login and Claude Code's usage numbers while the window is focused. These are local file reads; nothing is sent over the network. `0` turns auto-refresh off; values below 5 count as 5."
+          "markdownDescription": "How often, in seconds, the Claude Switch tab and status bar re-read the login while the window is focused, so a switch in another window or a `/login` shows at once. These are local file reads; nothing is sent over the network. Usage is checked separately, see `#claudeRoster.usageCheckSeconds#`. `0` turns auto-refresh off."
         }
       }
     }

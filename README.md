@@ -85,7 +85,7 @@ Each account card shows the account's plan (for example Team, Pro or Max 20x), i
 
 - **Usage:** this window's account shows meters for the 5-hour session and the weekly limit, with their reset times; a limit that resets within the hour counts down, for example "Resets in 23 minutes". These are the same numbers as `/usage` in Claude Code. Meters are blue, turn yellow from 70% and red from 80%.
 - **Where the numbers come from:** every 10 seconds while the tab is open and the window is focused, Claude Switch asks Claude Code's own CLI for the current usage, the same way Claude Code's Account & Usage panel asks it. The CLI fetches the numbers from Anthropic with its own login; Claude Switch never handles your token or makes the request itself. The CLI runs in safe mode, so your hooks, plugins, MCP servers and CLAUDE.md files are not loaded, and it saves no conversation. Each check takes a few seconds, and gets fresh numbers: Claude Switch clears the ones the CLI saved in its own settings folder, which it would otherwise reuse for a minute. If a check fails, for example because Anthropic is limiting requests, the next one waits longer.
-- Between checks, and if `claudeRoster.usageCheckSeconds` is `0`, Claude Switch shows the numbers Claude Code last saved in `.claude.json`, re-read every 10 seconds (see `claudeRoster.autoRefreshSeconds`). Those can be several minutes old, and while windows use different accounts they are not used at all, because Claude labels them with the default account.
+- Between checks, and if `claudeRoster.usageCheckSeconds` is `0`, Claude Switch shows the numbers Claude Code last saved in `.claude.json`, re-read every second (see `claudeRoster.autoRefreshSeconds`). Those can be several minutes old, and while windows use different accounts they are not used at all, because Claude labels them with the default account.
 - **Other accounts:** show the session and weekly numbers from when each was last active, with reset times and how old the numbers are. A limit whose reset time has passed shows as **reset**.
 - **Renewal:**
   - Pro and Max plans show a date *estimated* from the subscription start date, assuming monthly billing.
@@ -218,7 +218,7 @@ Note that `.credentials.json` can also hold sign-ins for MCP servers. Because th
 | `claudeRoster.switchMode` | `reloadWindow` | What happens after a switch: `reloadWindow`, `restartExtensions`, `newConversation` or `instant`. See [Switching](#switching). |
 | `claudeRoster.confirmBeforeSwitch` | `true` | Ask before switching in the `restartExtensions` and `reloadWindow` modes. Instant switches never ask. |
 | `claudeRoster.usageCheckSeconds` | `10` | How often to ask Claude Code's CLI for the current usage of this window's account, while the tab is open and the window is focused. Each check starts the CLI for a few seconds; raise it to check less often. `0` turns it off; the minimum is 10. |
-| `claudeRoster.autoRefreshSeconds` | `10` | How often the tab and status bar re-read the login and usage while the window is focused. Local file reads only. `0` turns it off; the minimum is 5. |
+| `claudeRoster.autoRefreshSeconds` | `1` | How often the tab and status bar re-read the login while the window is focused, so a switch in another window or a `/login` shows at once. Local file reads only. `0` turns it off. |
 
 If `CLAUDE_CONFIG_DIR` is set, Claude Switch switches the login in that folder and warns you once, because the Claude Code VS Code extension has been reported to ignore that variable.
 

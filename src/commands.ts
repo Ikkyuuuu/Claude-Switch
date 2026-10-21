@@ -41,7 +41,7 @@ export interface WindowContext {
 
 const DAY_MS = 24 * 60 * 60_000;
 /** How often to see whether a usage check is due. */
-const USAGE_TICK_MS = 5_000;
+const USAGE_TICK_MS = 1_000;
 /** After a failed usage check, the wait before the next, doubling each time up to USAGE_BACKOFF_MAX_MS. */
 const USAGE_BACKOFF_MS = 30_000;
 const USAGE_BACKOFF_MAX_MS = 10 * 60_000;
@@ -334,7 +334,7 @@ export class RosterController implements vscode.Disposable {
    */
   startAutoRefresh(): void {
     this.stopAutoRefresh();
-    const seconds = vscode.workspace.getConfiguration('claudeRoster').get<number>('autoRefreshSeconds', 10);
+    const seconds = vscode.workspace.getConfiguration('claudeRoster').get<number>('autoRefreshSeconds', 1);
     if (!Number.isFinite(seconds) || seconds <= 0) {
       return;
     }
@@ -344,7 +344,7 @@ export class RosterController implements vscode.Disposable {
           void this.refresh().then(() => this.checkUsageIfDue());
         }
       },
-      Math.max(5, seconds) * 1000,
+      Math.max(1, seconds) * 1000,
     );
   }
 

@@ -28,7 +28,7 @@ export class WindowSync {
     private readonly dir: string,
     private readonly source: string,
     private readonly onSignal: (signal: SwitchSignal) => void,
-    private readonly intervalMs = 1500,
+    private readonly intervalMs = 1000,
   ) {
     this.file = path.join(dir, SIGNAL_FILE);
   }

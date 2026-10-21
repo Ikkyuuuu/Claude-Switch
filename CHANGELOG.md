@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.3
+
+- The tab and status bar re-read the login every second (`claudeRoster.autoRefreshSeconds`, now 1 by default), so a switch in another window or a `/login` shows within a second. These are local file reads.
+- Reset countdowns and "Updated … ago" update every second.
+- A switch in another window is noticed within a second, and a terminal sign-in is picked up within a second.
+- Usage checks stay at most every 10 seconds: each one starts the Claude CLI and asks Anthropic, which takes a few seconds.
+
 ## 0.11.2
 
 - Usage is checked every 10 seconds instead of every minute (`claudeRoster.usageCheckSeconds`, now 10 by default and at least 10). Each check gets fresh numbers: Claude Switch clears the ones the CLI saved in the check's own settings folder, which it would otherwise reuse for a minute.

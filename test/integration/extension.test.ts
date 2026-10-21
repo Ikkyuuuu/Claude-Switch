@@ -286,6 +286,9 @@ suite('Claude Switch in VS Code', () => {
       refreshes++;
       return refresh();
     };
+    // Without auto-refresh, any refresh in the pause below would come from a loop.
+    const config = vscode.workspace.getConfiguration('claudeRoster');
+    await config.update('autoRefreshSeconds', 0, vscode.ConfigurationTarget.Global);
     try {
       await writeLive(api.paths, { credentialsRaw: fakeLogin('Work').credentialsRaw, account: fakeLogin('Personal').account });
       await api.controller.refresh();
@@ -295,6 +298,7 @@ suite('Claude Switch in VS Code', () => {
       assert.ok(refreshes - after <= 1, `refreshed ${refreshes - after} more times`);
     } finally {
       api.engine.refresh = refresh;
+      await config.update('autoRefreshSeconds', undefined, vscode.ConfigurationTarget.Global);
     }
 
     await api.controller.switchAccount({ profileId: work.id, allWindows: true });
