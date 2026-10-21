@@ -17,7 +17,21 @@ declare function acquireVsCodeApi(): VsCodeApi;
 const vscode = acquireVsCodeApi();
 const app = document.getElementById('app') as HTMLElement;
 const logoUrl = app.dataset.logo ?? '';
-let state = vscode.getState() as RosterViewState | undefined;
+/**
+ * What the webview keeps across reloads. Not the accounts themselves: after a
+ * switch they would show the previous account until the extension catches up.
+ */
+interface Saved {
+  /** Set just before a reload, such as "Switching to Work…"; shown until the accounts arrive. */
+  loadingText?: string;
+}
+const saved = (vscode.getState() ?? {}) as Saved;
+/** Undefined until the extension sends the accounts; the tab shows the loading screen meanwhile. */
+let state: RosterViewState | undefined;
+let loadingText = typeof saved.loadingText === 'string' ? saved.loadingText : undefined;
+/** When the loading screen appeared; after a while it suggests what to do. */
+let loadingSince = Date.now();
+const SLOW_LOADING_MS = 20_000;
 let codeSent = false;
 let rendered = false;
 /** Which screen the tab shows. */
@@ -33,6 +47,9 @@ let notices: Notice[] = [];
 let busyText: string | null = null;
 /** Text typed into inputs, kept across re-renders by input id. */
 const drafts = new Map<string, string>();
+/** Whether a dialog was open at the last render, and what had the focus when it opened. */
+let dialogOpen = false;
+let focusBeforeDialog: string | undefined;
 /** The colour picked in the Edit account dialog, kept across re-renders like drafts. */
 let pickedColour: number | undefined;
 
@@ -56,11 +73,13 @@ function closeLogPage(): void {
 
 /** freshPrompt: a new dialog just arrived, so start it empty and focus it. */
 function render(options: { freshPrompt?: boolean } = {}): void {
-  if (page === 'accounts' && !state) {
-    return;
-  }
   // Re-rendering replaces the DOM; keep whatever was typed, and the focus.
-  const activeId = document.activeElement instanceof HTMLElement ? document.activeElement.id : '';
+  const focused = focusKey(document.activeElement);
+  const dialogClosed = dialogOpen && !prompt;
+  dialogOpen = !!prompt;
+  if (options.freshPrompt) {
+    focusBeforeDialog = focused;
+  }
   for (const input of app.querySelectorAll<HTMLInputElement>('input[id]')) {
     drafts.set(input.id, input.value);
   }
@@ -69,9 +88,9 @@ function render(options: { freshPrompt?: boolean } = {}): void {
     pickedColour = undefined;
   }
 
-  const content = page === 'log' || !state ? logPage() : view(state);
+  const content = page === 'log' ? logPage() : state ? view(state) : loadingPage();
   // While a dialog is open, the page behind it can't be clicked or tabbed into.
-  const pageNode = h('div', { class: 'page', inert: !!prompt }, ...content, notifications());
+  const pageNode = h('div', { class: 'page', inert: !!prompt, 'aria-busy': state ? 'false' : 'true' }, ...content, notifications());
   app.replaceChildren(pageNode, ...(prompt ? [dialog(prompt)] : []));
   if (!rendered) {
     // Only the first render fades in; later updates should not flicker.
@@ -88,9 +107,43 @@ function render(options: { freshPrompt?: boolean } = {}): void {
   }
   if (options.freshPrompt) {
     focusDialog();
-  } else if (activeId) {
-    document.getElementById(activeId)?.focus();
+  } else if (dialogClosed) {
+    restoreFocus(focusBeforeDialog);
+  } else {
+    restoreFocus(focused);
   }
+}
+
+const FOCUSABLE = 'button, input, a[href], [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Identifies the focused element so the same one can be focused after a
+ * re-render: by id, by data-focus, or else by its place among focusable elements.
+ */
+function focusKey(element: Element | null): string | undefined {
+  if (!(element instanceof HTMLElement) || !app.contains(element)) {
+    return undefined;
+  }
+  if (element.id) {
+    return `#${element.id}`;
+  }
+  if (element.dataset.focus) {
+    return `data:${element.dataset.focus}`;
+  }
+  const index = [...app.querySelectorAll(FOCUSABLE)].indexOf(element);
+  return index >= 0 ? `index:${index}` : undefined;
+}
+
+function restoreFocus(key: string | undefined): void {
+  let target: Element | null | undefined;
+  if (key?.startsWith('#')) {
+    target = document.getElementById(key.slice(1));
+  } else if (key?.startsWith('data:')) {
+    target = [...app.querySelectorAll<HTMLElement>('[data-focus]')].find((e) => e.dataset.focus === key.slice(5));
+  } else if (key?.startsWith('index:')) {
+    target = app.querySelectorAll(FOCUSABLE)[Number(key.slice(6))];
+  }
+  (target as HTMLElement | null | undefined)?.focus();
 }
 
 // ---------------------------------------------------------------- dialogs and notices
@@ -294,7 +347,7 @@ function notifications(): HTMLElement | null {
     ...notices.map((n) =>
       h(
         'div',
-        { class: `toast ${n.level}`, role: n.level === 'error' || n.level === 'warning' ? 'alert' : 'status' },
+        { class: `toast ${n.level}` },
         icon(NOTICE_ICONS[n.level]),
         h(
           'div',
@@ -318,7 +371,7 @@ function notifications(): HTMLElement | null {
       ),
     ),
     busyText
-      ? h('div', { class: 'toast busy', role: 'status' }, h('span', { class: 'spinner small', 'aria-hidden': 'true' }), h('div', { class: 'toast-body' }, busyText))
+      ? h('div', { class: 'toast busy' }, h('span', { class: 'spinner small', 'aria-hidden': 'true' }), h('div', { class: 'toast-body' }, busyText))
       : null,
   );
 }
@@ -363,7 +416,13 @@ function view(s: RosterViewState): Node[] {
     if (s.signIn) {
       nodes.push(signInCard(s.signIn));
     }
-    nodes.push(section('Current account', currentCard(s.current)));
+    nodes.push(
+      section(
+        s.perWindow === false ? 'Current account' : 'This window',
+        currentCard(s.current),
+        ...(s.windowNote ? [h('p', { class: 'window-note' }, s.windowNote)] : []),
+      ),
+    );
     nodes.push(
       section(
         s.others.length ? 'Switch to' : 'Other accounts',
@@ -384,6 +443,31 @@ function view(s: RosterViewState): Node[] {
 
 function title(): HTMLElement {
   return h('h1', { class: 'hero-title' }, 'Claude ', h('span', { class: 'accent-text' }, 'Switch'));
+}
+
+/** Until the extension sends the accounts: VS Code is starting, or the window is reloading after a switch. */
+function loadingPage(): Node[] {
+  return [
+    h(
+      'main',
+      { class: 'loading', role: 'status' },
+      h('span', { class: 'spinner large', 'aria-hidden': 'true' }),
+      h('p', { class: 'loading-text' }, loadingText ?? 'Loading…'),
+      Date.now() - loadingSince >= SLOW_LOADING_MS
+        ? h('p', { class: 'loading-hint' }, 'This is taking longer than usual. If it stays like this, run "Developer: Reload Window" from the Command Palette.')
+        : null,
+    ),
+  ];
+}
+
+/** Shows the hint on the loading screen if it is still up after SLOW_LOADING_MS. */
+function watchSlowLoading(): void {
+  loadingSince = Date.now();
+  setTimeout(() => {
+    if (!state) {
+      render();
+    }
+  }, SLOW_LOADING_MS);
 }
 
 function brandBar(): HTMLElement {
@@ -423,7 +507,14 @@ function currentCard(current: RosterViewState['current']): HTMLElement {
                 : h('span', { class: 'pill ok' }, 'Active'),
               a.plan ? h('span', { class: 'pill plan' }, a.plan) : null,
             ),
-            a.expired ? h('p', { class: 'hint' }, 'Run /login in Claude Code to sign in again.') : null,
+            a.expired
+              ? h(
+                  'p',
+                  { class: 'hint' },
+                  'This saved login has expired. ',
+                  h('button', { class: 'link', onclick: () => send({ type: 'signInAgain', profileId: a.id }) }, 'Sign in again'),
+                )
+              : null,
           ),
           h('div', { class: 'card-actions' }, iconButton('pencil', `Edit ${a.alias}`, () => send({ type: 'rename', profileId: a.id }))),
         ),
@@ -473,21 +564,18 @@ function accountRow(a: AccountCard): HTMLElement {
     'div',
     {
       class: ['row', a.expired ? 'expired' : '', waiting ? 'waiting' : ''].filter(Boolean).join(' '),
-      role: 'button',
-      tabindex: '0',
-      'aria-disabled': waiting ? 'true' : 'false',
-      title: [`Switch to ${a.alias}`, usageSummary(a), lastUsed(a)].filter(Boolean).join('\n'),
-      'aria-label': `Switch to ${a.alias}, ${a.email}${a.expired ? ', sign-in expired' : ''}`,
+      title: [switchLabel(a), usageSummary(a), lastUsed(a)].filter(Boolean).join('\n'),
       'data-vscode-context': context('profile', a.id),
-      onclick: switchTo,
-      onkeydown: (event: Event) => {
-        const key = (event as KeyboardEvent).key;
-        if ((key === 'Enter' || key === ' ') && event.target === event.currentTarget) {
-          event.preventDefault();
-          switchTo();
-        }
-      },
     },
+    // Covers the whole row: one click target, and one control for the keyboard and screen readers.
+    h('button', {
+      class: 'row-hit',
+      type: 'button',
+      'aria-label': `${switchLabel(a)}, ${a.email}${a.expired ? ', sign-in expired' : ''}`,
+      'aria-disabled': waiting ? 'true' : 'false',
+      'data-focus': `row:${a.id}`,
+      onclick: switchTo,
+    }),
     avatar(a),
     h(
       'div',
@@ -511,6 +599,10 @@ function accountRow(a: AccountCard): HTMLElement {
       h('span', { class: 'go', 'aria-hidden': 'true' }, a.expired ? 'Sign in' : 'Switch', icon('arrow')),
     ),
   );
+}
+
+function switchLabel(a: AccountCard): string {
+  return state?.perWindow === false ? `Switch to ${a.alias}` : `Use ${a.alias} in this window`;
 }
 
 function signInCard(signIn: NonNullable<RosterViewState['signIn']>): HTMLElement {
@@ -605,7 +697,7 @@ function reloadBanner(alias: string | undefined): HTMLElement {
     'div',
     { class: 'banner warn', role: 'status' },
     icon('refresh'),
-    h('div', { class: 'banner-text' }, alias ? `Switched to “${alias}” in another window.` : 'The account was switched in another window.'),
+    h('div', { class: 'banner-text' }, alias ? `This window's account changed to “${alias}”. Reload so Claude Code here uses it.` : "This window's account changed. Reload so Claude Code here uses it."),
     h('button', { class: 'btn primary small', onclick: () => send({ type: 'reload' }) }, 'Reload'),
   );
 }
@@ -1066,7 +1158,17 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
         codeSent = false;
       }
       state = message.state;
-      vscode.setState(state);
+      loadingText = undefined;
+      vscode.setState({} satisfies Saved);
+      render();
+      break;
+    case 'reloading':
+      // The window goes down next; the loading screen, with this text, stays until it is back.
+      state = undefined;
+      page = 'accounts';
+      loadingText = message.text;
+      vscode.setState({ loadingText } satisfies Saved);
+      watchSlowLoading();
       render();
       break;
     case 'log':
@@ -1088,9 +1190,18 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
     }
     case 'notices':
       notices = Array.isArray(message.notices) ? message.notices : [];
+      for (const notice of notices) {
+        if (!announced.has(notice.id)) {
+          announced.add(notice.id);
+          announce(notice.text, notice.level === 'error' || notice.level === 'warning');
+        }
+      }
       render();
       break;
     case 'busy':
+      if (message.text && message.text !== busyText) {
+        announce(message.text, false);
+      }
       busyText = message.text;
       render();
       break;
@@ -1103,10 +1214,18 @@ window.addEventListener('keydown', (event) => {
     answer();
   }
 });
-// A restored webview shows its last state at once; the extension then sends a fresh one.
-if (state) {
-  render();
+// Screen readers hear each notice once, from here: re-rendering the toasts would repeat them.
+const announcer = h('div', { class: 'sr-only', 'aria-live': 'polite', 'aria-atomic': 'true' });
+document.body.append(announcer);
+const announced = new Set<string>();
+function announce(text: string, urgent: boolean): void {
+  announcer.setAttribute('aria-live', urgent ? 'assertive' : 'polite');
+  announcer.textContent = text;
 }
+
+// The loading screen at once; the extension then sends the accounts.
+watchSlowLoading();
+render();
 vscode.postMessage({ type: 'ready' });
 
 // Keeps "Updated 5 minutes ago" and reset times current, without disturbing focus or typing.

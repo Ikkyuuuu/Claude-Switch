@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.11.1
+
+Bug fixes and polish.
+
+- Fixed: while the default login could not be read for a moment, Claude Switch could give the default account a login folder too, so the same login was in two places and one copy could sign the other out.
+- Fixed: Restore Last Backup put back the backup's tokens even when the account had been used since and its refresh token replaced, which signed out windows on the default account. It now restores the newest tokens.
+- Fixed: signing in again to an account that a window uses with its own login folder left that folder on the old, possibly expired, login.
+- Fixed: an instant switch removed the login folder that the window's open conversations still used, so a token they refreshed could be lost. A folder that no window uses now stays a day.
+- Fixed: "Switch again" after a Switch All Windows that did not stick switched only the current window.
+- Fixed: a change of the default account in another window asked windows with their own account to reload. Windows whose login did move now ask to reload in every switch mode.
+- Fixed: Switch All Windows could report a failure after the switch itself had worked.
+- Fixed: with `CLAUDE_SECURESTORAGE_CONFIG_DIR` set by you, switching changed a login file Claude does not read. It now switches the login in that folder.
+- Fixed: a window's account choice older than 30 days came back after a restart and switched the window a few seconds later.
+- Fixed: after a failed sign-in, Add account did nothing until the error was dismissed.
+- Fixed: errors from clicks in the tab, such as saving an edit to an account another window had just removed, went unreported. They now show in the tab.
+- Fixed: usage checks only ran as often as auto-refresh; they now follow `claudeRoster.usageCheckSeconds` on their own.
+- Fixed: the loading screen could stay up if a reload was cancelled. The status bar's Reload button now restarts extensions only, in that mode.
+- Keyboard and screen readers: focus stays where it was when the tab updates and returns after a dialog closes; notices are read out once; each account row has a proper button, with Edit and Remove beside it.
+- An expired account shows **Sign in again** instead of suggesting `/login`, which in a window with its own account would mix up the shared account details.
+- "Last used" now counts switching a single window.
+- Clearer wording: the note under this window's account for every kind of default login, Restore Last Backup, the reload banner, settings descriptions, and a new Troubleshooting section in the README.
+- The status bar says Claude Switch is loading until the first check is done, and a loading screen that takes long suggests what to do.
+- The Accounts view has an icon, for when it is moved to another part of VS Code.
+- README: a Highlights section, and new pictures of the tab, two windows on different accounts, the Edit account dialog, the loading screen and the sign-in card.
+
+## 0.11.0
+
+- **Each VS Code window can use its own Claude account.** Clicking an account switches only the window you are in; other windows keep theirs. Each workspace remembers its account. Claude Code in that window, and its terminals, read the account's login from a folder of its own (through `CLAUDE_SECURESTORAGE_CONFIG_DIR`), while settings, history and MCP servers stay shared in `~/.claude`.
+- Each login lives in exactly one place, so two copies can never sign each other out: the default account's in `~/.claude`, every other account's that a window uses in its own folder, which goes away when no window uses it.
+- New **Switch All Windows** (right-click an account, or the **⋯** menu): the old behaviour, which changes the default login in `~/.claude` and puts every window back on it.
+- The tab's top section is now **This window**, and says which account other windows use by default when this window has its own.
+- Usage checks run with a settings folder of their own per account, so each window shows its own account's numbers; Claude Code's shared usage cache is ignored while windows use different accounts, because Claude labels it with the default account.
+- Claude Switch now starts with VS Code, before Claude Code, so a window's Claude starts on the window's account.
+- Add Account and its terminal fallback ignore the window's login folder, so a new sign-in never lands in it.
+- A loading screen while VS Code starts or the window reloads after a switch: a spinner in the middle of the tab, with what is happening below it, such as "Switching to Work…". The tab no longer shows the previous account until the extension catches up, or "signed out" for a moment.
+- Fixed: in a narrow sidebar, an estimated renewal date's "estimated" tag could stick out of the card.
+
 ## 0.10.1
 
 Bug fixes.

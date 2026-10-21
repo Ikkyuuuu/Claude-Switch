@@ -2,7 +2,7 @@
   "name": "claude-switch-accounts",
   "displayName": "Claude Switch (unofficial)",
   "description": "Switch which Claude account the Claude Code extension and CLI use. Not affiliated with Anthropic.",
-  "version": "0.10.1",
+  "version": "0.11.1",
   "publisher": "wattanun42",
   "license": "MIT",
   "repository": {
@@ -27,7 +27,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "*"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -51,6 +51,7 @@
           "type": "webview",
           "id": "claudeRoster.accounts",
           "name": "Accounts",
+          "icon": "resources/roster.svg",
           "contextualTitle": "Claude Switch"
         }
       ]
@@ -58,9 +59,14 @@
     "commands": [
       {
         "command": "claudeRoster.switch",
-        "title": "Switch Account",
+        "title": "Switch This Window's Account",
         "category": "Claude Switch",
         "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "claudeRoster.switchAll",
+        "title": "Switch All Windows",
+        "category": "Claude Switch"
       },
       {
         "command": "claudeRoster.add",
@@ -170,6 +176,11 @@
           "group": "navigation@2"
         },
         {
+          "command": "claudeRoster.switchAll",
+          "when": "view == claudeRoster.accounts",
+          "group": "0_switch@1"
+        },
+        {
           "command": "claudeRoster.recapture",
           "when": "view == claudeRoster.accounts",
           "group": "1_login@1"
@@ -197,6 +208,11 @@
           "group": "1_switch@1"
         },
         {
+          "command": "claudeRoster.switchAll",
+          "when": "webviewId == 'claudeRoster.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
+          "group": "1_switch@2"
+        },
+        {
           "command": "claudeRoster.rename",
           "when": "webviewId == 'claudeRoster.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
           "group": "2_edit@1"
@@ -220,7 +236,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "Path to the Claude Code CLI that **Add Account** uses to sign in. Leave empty to use the CLI bundled with the Claude Code extension, or `claude` on PATH. User settings only; workspace settings cannot change it."
+          "markdownDescription": "Path to the Claude Code CLI that Claude Switch runs: to sign in with **Add Account**, and for usage checks. Leave empty to use the CLI bundled with the Claude Code extension, or `claude` on PATH. User settings only; workspace settings cannot change it."
         },
         "claudeRoster.confirmBeforeSwitch": {
           "type": "boolean",
@@ -240,18 +256,18 @@
           "enumDescriptions": [
             "Close and reopen the window after switching, so every Claude Code conversation in it restarts on the new account. The most reliable.",
             "Restart VS Code extensions (a few seconds; editors and terminals stay open), so every Claude Code conversation in this window uses the new account.",
-            "Switch without restarting and open a new Claude Code conversation on the new account. Conversations that were already open keep the old account and can write it back.",
-            "Switch without restarting. New Claude Code conversations use the new account; open ones keep the old account and can write it back."
+            "Switch without restarting and open a new Claude Code conversation on the new account. Conversations that were already open keep the old account. After Switch All Windows, they can also write it back.",
+            "Switch without restarting. New Claude Code conversations use the new account; open ones keep the old account. After Switch All Windows, they can also write it back."
           ],
           "scope": "application",
-          "markdownDescription": "What happens after switching accounts. By default the window reloads, so no Claude Code conversation is left running on the old account. The instant modes are faster, but conversations that were already open keep the old account until you start a new one."
+          "markdownDescription": "What happens in the window that switches, after a switch (other windows keep their accounts unless you use **Switch All Windows**). By default the window reloads, so no Claude Code conversation is left running on the old account. The instant modes are faster, but conversations and terminals that were already open keep the old account until you start new ones."
         },
         "claudeRoster.usageCheckSeconds": {
           "type": "number",
           "default": 60,
           "minimum": 0,
           "scope": "application",
-          "markdownDescription": "How often, in seconds, Claude Switch asks Claude Code for the active account's current usage while the Claude Switch tab is open and the window is focused. Claude Code's own CLI fetches the numbers, the way its Account & Usage panel does; Claude Switch never handles your token or makes the request itself. Without this, the tab shows the numbers Claude Code last saved, which can be several minutes old. `0` turns it off; values below 60 count as 60, because Claude reuses numbers younger than a minute."
+          "markdownDescription": "How often, in seconds, Claude Switch asks Claude Code for the current usage of this window's account while the Claude Switch tab is open and the window is focused. Claude Code's own CLI fetches the numbers, the way its Account & Usage panel does; Claude Switch never handles your token or makes the request itself. Without this, the tab shows the numbers Claude Code last saved, which can be several minutes old. `0` turns it off; values below 60 count as 60, because Claude reuses numbers younger than a minute."
         },
         "claudeRoster.autoRefreshSeconds": {
           "type": "number",
@@ -274,7 +290,7 @@
     "test:unit": "npm run compile-tests && mocha",
     "test:integration": "npm run compile-tests && node esbuild.js && vscode-test",
     "test": "npm run test:unit && npm run test:integration",
-    "vsix": "vsce package"
+    "vsix": "vsce package --allow-star-activation"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

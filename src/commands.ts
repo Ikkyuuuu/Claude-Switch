@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { nextRenewal } from './accountDetails';
@@ -11,15 +11,39 @@ import { RosterLog } from './rosterLog';
 import { RosterStatusBar } from './statusBar';
 import { LiveState, LockBusyError, SwitchEngine } from './switchEngine';
 import { askClaudeForUsage, UsageCheckOptions } from './usageCheck';
+import { LOGIN_DIR_VARIABLE, LoginFolders } from './windowAccounts';
 import { MAX_ALIAS_LENGTH } from './webview/rules';
 import { colourOf } from './viewModel';
 import { SwitchSignal, WindowSync } from './windowSync';
 
 export interface SwitchArgs {
   profileId?: string;
+  /** Switch every window, by changing the default account in ~/.claude. Otherwise only this window switches. */
+  allWindows?: boolean;
   /** Honoured only when the extension runs under the test runner. */
   skipConfirm?: boolean;
 }
+
+/** What the controller needs to give this window its own account. See windowAccounts.ts. */
+export interface WindowContext {
+  /** False when the user set CLAUDE_SECURESTORAGE_CONFIG_DIR themselves: every switch is then for all windows. */
+  enabled: boolean;
+  /** Identifies this window's workspace across reloads. */
+  key: string;
+  folders: LoginFolders;
+  /** The folder of the default login: ~/.claude, or CLAUDE_CONFIG_DIR. */
+  defaultLoginDir: string;
+  /** The login folder this window's Claude uses now; undefined means the default login. */
+  readonly loginDir: string | undefined;
+  /** Points this window's Claude, and its terminals, at a login folder. */
+  setLoginDir(dir: string | undefined): void;
+}
+
+const DAY_MS = 24 * 60 * 60_000;
+/** How often to see whether a usage check is due. */
+const USAGE_TICK_MS = 15_000;
+/** After asking for a reload: if the window is still here this much later, it is not reloading. */
+const RELOAD_GIVE_UP_MS = 5_000;
 
 const BILLING_URL = 'https://claude.ai/settings/billing';
 const REFRESH_THROTTLE_MS = 30_000;
@@ -45,7 +69,7 @@ function switchMode(): SwitchMode {
   return mode === 'newConversation' || mode === 'instant' || mode === 'restartExtensions' ? mode : 'reloadWindow';
 }
 
-/** Shown before switching in the modes that interrupt the user. */
+/** Shown before switching every window in the modes that interrupt the user. */
 const RESTART_DETAIL: Record<'restartExtensions' | 'reloadWindow', string> = {
   restartExtensions: [
     'VS Code restarts its extensions, which takes a few seconds. Your editors and terminals stay open.',
@@ -58,6 +82,15 @@ const RESTART_DETAIL: Record<'restartExtensions' | 'reloadWindow', string> = {
   ].join('\n\n'),
 };
 
+/** Shown before switching only this window, in the modes that interrupt the user. */
+const WINDOW_RESTART_DETAIL: Record<'restartExtensions' | 'reloadWindow', string> = {
+  restartExtensions: [
+    "VS Code restarts this window's extensions, which takes a few seconds. Your editors and terminals stay open.",
+    'Claude tasks running in this window stop. Other windows keep their accounts.',
+  ].join('\n\n'),
+  reloadWindow: ['This window reloads, and any Claude task running in it stops.', 'Other windows keep their accounts.'].join('\n\n'),
+};
+
 /** How long after an instant switch to watch for an older conversation writing its login back. */
 const WRITE_BACK_WATCH_MS = 12 * 60 * 60_000;
 
@@ -67,10 +100,19 @@ const WRITE_BACK_WATCH_MS = 12 * 60 * 60_000;
  * happens in SwitchEngine.
  */
 export class RosterController implements vscode.Disposable {
+  /** The default login, in ~/.claude. */
   private live: LiveState = { kind: 'signed-out' };
+  /** What this window uses: the account it chose, while that isn't the default, else `live`. */
+  private windowLive: LiveState = { kind: 'signed-out' };
+  /** The account whose login folder this window uses, when it isn't the default account. */
+  private windowFolderId: string | undefined;
+  private refreshedOnce = false;
+  /** The account whose missing login folder was already reported. */
+  private missingFolderWarned: string | undefined;
   private lastRefresh = 0;
   private inFlight: Promise<LiveState> | undefined;
   private autoRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  private usageTimer: ReturnType<typeof setInterval> | undefined;
   private reloadPending: { alias?: string } | undefined;
   /** The Add Account sign-in running in the background, if any. */
   private signIn: { cli: ClaudeLogin; abort: AbortController; email?: string } | undefined;
@@ -104,6 +146,7 @@ export class RosterController implements vscode.Disposable {
     private readonly testMode: boolean,
     /** Claude Switch's own folder, where the CLI runs for usage checks. */
     private readonly storageDir: string,
+    private readonly window: WindowContext,
   ) {
     if (testMode) {
       this.askUsage = () => Promise.reject(new Error('Usage checks are off under the test runner.'));
@@ -118,6 +161,8 @@ export class RosterController implements vscode.Disposable {
     });
     await this.refresh();
     this.startAutoRefresh();
+    // Its own timer, so usage checks follow claudeRoster.usageCheckSeconds whatever autoRefreshSeconds is.
+    this.usageTimer = setInterval(() => this.checkUsageIfDue(), USAGE_TICK_MS);
     if (check.outcome === 'mismatch') {
       const choice = await this.view.notify(
         'warning',
@@ -128,7 +173,7 @@ export class RosterController implements vscode.Disposable {
         ],
       );
       if (choice === 'again') {
-        await this.switchAccount({ profileId: check.profile.id });
+        await this.switchAccount({ profileId: check.profile.id, allWindows: true });
       } else if (choice === 'log') {
         this.showLog();
       }
@@ -144,10 +189,77 @@ export class RosterController implements vscode.Disposable {
     } catch (err) {
       this.live = { kind: 'error', message: errorMessage(err) };
     }
+    await this.updateWindowAccount();
     this.lastRefresh = Date.now();
     this.render();
     void this.checkWriteBack();
     return this.live;
+  }
+
+  /**
+   * Works out the account this window uses: the one it chose, else the default
+   * account in ~/.claude. Keeps the login folders in order (see
+   * windowAccounts.ts), points this window's Claude at the right login, and
+   * saves tokens Claude refreshed in this window's folder.
+   */
+  private async updateWindowAccount(): Promise<void> {
+    const first = !this.refreshedOnce;
+    this.refreshedOnce = true;
+    if (!this.window.enabled) {
+      this.windowFolderId = undefined;
+      this.windowLive = this.live;
+      return;
+    }
+    // While the default login can't be read, leave the folders and this window as they are:
+    // taking it for "no default account" would copy the default account into a folder too.
+    if (this.live.kind === 'error') {
+      if (!this.windowFolderId) {
+        this.windowLive = this.live;
+      }
+      return;
+    }
+    const defaultId = this.live.kind === 'known' ? this.live.profile.id : undefined;
+    const choice = this.store.getWindowChoice(this.window.key);
+    if (choice && Date.now() - choice.at > DAY_MS) {
+      // Choices unused for 30 days expire; using one keeps it.
+      void this.store.setWindowChoice(this.window.key, choice.profileId).catch(() => undefined);
+    }
+    try {
+      await this.engine.reconcileFolders(this.window.folders, defaultId, this.store.chosenAccounts());
+    } catch (err) {
+      // Another window is busy with the folders or a switch; try again next time.
+      if (!(err instanceof LockBusyError)) {
+        this.log.warn(`Could not update the login folders: ${errorMessage(err)}`);
+      }
+    }
+    this.engine.usageCacheTrusted = (await this.window.folders.list()).length === 0;
+
+    const folderId = choice && choice.profileId !== defaultId && this.window.folders.has(choice.profileId) ? choice.profileId : undefined;
+    if (choice && choice.profileId !== defaultId && !folderId && this.missingFolderWarned !== choice.profileId) {
+      // For example, its saved login is gone: the window uses the default account meanwhile.
+      this.missingFolderWarned = choice.profileId;
+      this.log.warn(`This window should use "${this.store.get(choice.profileId)?.alias}", but its login could not be prepared, so it uses the default account.`);
+    }
+    const loginDir = folderId ? this.window.folders.dirOf(folderId) : undefined;
+    if (loginDir !== this.window.loginDir) {
+      this.window.setLoginDir(loginDir);
+      if (!first && !this.switching) {
+        // Another window moved this window's login. Claude processes already running here hold it
+        // where it was, and could write it back there, so this window should reload in every mode.
+        this.log.info(`This window now uses ${folderId ? `"${this.store.get(folderId)?.alias}"` : 'the default account'}.`);
+        this.reloadPending = { alias: folderId ? this.store.get(folderId)?.alias : this.live.kind === 'known' ? this.live.profile.alias : undefined };
+      }
+    }
+    this.windowFolderId = folderId;
+    const profile = folderId ? this.store.get(folderId) : undefined;
+    this.windowLive = profile ? profileLive(profile) : this.live;
+
+    if (folderId) {
+      const raw = await this.window.folders.read(folderId).catch(() => undefined);
+      if (raw) {
+        await this.engine.syncFolder(folderId, raw).catch((err) => this.log.warn(`Could not save the refreshed login: ${errorMessage(err)}`));
+      }
+    }
   }
 
   /**
@@ -200,7 +312,7 @@ export class RosterController implements vscode.Disposable {
       [{ id: 'again', label: `Switch to "${watch.alias}"`, style: 'primary' }],
     );
     if (choice === 'again') {
-      await this.switchAccount({ profileId: watch.profileId });
+      await this.switchAccount({ profileId: watch.profileId, allWindows: true });
     }
   }
 
@@ -241,7 +353,7 @@ export class RosterController implements vscode.Disposable {
     if (
       seconds &&
       !this.usageCheck &&
-      this.live.kind === 'known' &&
+      this.windowLive.kind === 'known' &&
       this.view.visible &&
       vscode.window.state.focused &&
       Date.now() - this.lastUsageCheck >= seconds * 1000
@@ -250,7 +362,7 @@ export class RosterController implements vscode.Disposable {
     }
   }
 
-  /** Asks Claude Code's CLI for the live account's usage now. See usageCheck.ts. */
+  /** Asks Claude Code's CLI for the usage of this window's account now. See usageCheck.ts. */
   checkUsage(): Promise<void> {
     this.usageCheck ??= this.runUsageCheck().finally(() => {
       this.usageCheck = undefined;
@@ -260,9 +372,23 @@ export class RosterController implements vscode.Disposable {
 
   private async runUsageCheck(): Promise<void> {
     this.lastUsageCheck = Date.now();
+    if (this.windowLive.kind !== 'known') {
+      return;
+    }
+    const profileId = this.windowLive.profile.id;
+    const folderId = this.windowFolderId;
     const claude = resolveClaude();
     try {
-      const updated = await this.engine.checkUsage(() => this.askUsage({ command: claude.command, cwd: this.storageDir }));
+      // A settings folder of its own per account: Claude's usage cache in ~/.claude.json is
+      // shared, and labelled with the default account even when another account's login was used.
+      const configDir = path.join(this.storageDir, 'usage', profileId);
+      await fs.mkdir(configDir, { recursive: true });
+      const env = {
+        ...process.env,
+        CLAUDE_CONFIG_DIR: configDir,
+        [LOGIN_DIR_VARIABLE]: folderId ? this.window.folders.dirOf(folderId) : this.window.defaultLoginDir,
+      };
+      const updated = await this.engine.checkUsage(() => this.askUsage({ command: claude.command, cwd: this.storageDir, env }), folderId);
       this.usageCheckFailed = false;
       if (updated) {
         await this.refresh();
@@ -296,13 +422,122 @@ export class RosterController implements vscode.Disposable {
     }
     this.switching = true;
     try {
-      await this.switchToProfile(args.profileId, args.skipConfirm);
+      if (args.allWindows || !this.window.enabled) {
+        await this.switchToProfile(args.profileId, args.skipConfirm);
+      } else {
+        await this.switchWindow(args.profileId, args.skipConfirm);
+      }
     } finally {
       this.switching = false;
       this.render();
     }
   }
 
+  /** "Switch All Windows": profileId comes from the tab; without it, the tab asks which account. */
+  async switchAllWindows(profileId?: string): Promise<void> {
+    const profile = profileId ? this.store.get(profileId) : await this.pickProfile('Which account should every window use?');
+    if (profile) {
+      await this.switchAccount({ profileId: profile.id, allWindows: true });
+    }
+  }
+
+  /**
+   * Switches only this window: its Claude gets the account's own login, and
+   * other windows keep theirs. Claude conversations already running here keep
+   * the previous login, in its own place, so nothing is written back.
+   */
+  private async switchWindow(profileId: string, skipConfirmInTests?: boolean): Promise<void> {
+    const live = await this.refresh();
+    const profile = this.store.get(profileId);
+    if (!profile) {
+      void this.view.notify('error', 'That account is no longer saved in Claude Switch.');
+      return;
+    }
+    if (this.windowLive.kind === 'known' && this.windowLive.profile.id === profile.id) {
+      void this.view.notify('info', `This window already uses "${profile.alias}".`);
+      return;
+    }
+    if (profile.status === 'needs-relogin' && !(await this.switchExpiredAnyway(profile))) {
+      return;
+    }
+    const mode = switchMode();
+    const skipConfirm = this.testMode && skipConfirmInTests;
+    if (
+      (mode === 'restartExtensions' || mode === 'reloadWindow') &&
+      !skipConfirm &&
+      vscode.workspace.getConfiguration('claudeRoster').get<boolean>('confirmBeforeSwitch', true)
+    ) {
+      const choice = await this.view.confirm({
+        title: `Switch this window to "${profile.alias}"?`,
+        message: WINDOW_RESTART_DETAIL[mode],
+        actions: [{ id: 'switch', label: mode === 'reloadWindow' ? 'Switch and reload' : 'Switch and restart', style: 'primary' }],
+      });
+      if (choice !== 'switch') {
+        return;
+      }
+    }
+
+    const defaultId = live.kind === 'known' ? live.profile.id : undefined;
+    try {
+      await this.view.busy(`Switching this window to "${profile.alias}"…`, async () => {
+        await this.store.setWindowChoice(this.window.key, profile.id);
+        // Gives the account its own login folder, unless it is the default account.
+        await this.engine.reconcileFolders(this.window.folders, defaultId, this.store.chosenAccounts(), false);
+        if (profile.id !== defaultId && !this.window.folders.has(profile.id)) {
+          throw new Error(`Claude Switch could not prepare the login for "${profile.alias}".`);
+        }
+      });
+    } catch (err) {
+      await this.refresh();
+      this.showError(err);
+      return;
+    }
+    this.log.info(`Switched this window to "${profile.alias}".`);
+    await this.store.markUsed(profile.id).catch(() => undefined);
+    this.reloadPending = undefined;
+    // Points this window's Claude at the new login; while switching, that is not news to report.
+    await this.refresh();
+
+    if (mode === 'reloadWindow' || mode === 'restartExtensions') {
+      await this.restartWindow(mode, `Switching to ${profile.alias}…`);
+      return;
+    }
+    // Instant: new Claude conversations in this window use the account from now on.
+    if (usageCheckSeconds()) {
+      void this.checkUsage();
+    }
+    const opened = mode === 'newConversation' && (await this.openConversation());
+    void this.view
+      .notify(
+        'success',
+        `This window now uses "${profile.alias}". ${opened ? 'A new Claude conversation is open on it.' : 'New Claude conversations here use it.'} Conversations and terminals that were already open keep the previous account; other windows keep theirs.`,
+        opened ? [] : [{ id: 'new', label: 'New conversation', style: 'primary' }],
+      )
+      .then((choice) => {
+        if (choice === 'new') {
+          void this.openConversation();
+        }
+      });
+  }
+
+  /** For an account whose saved login expired: offers to sign in again. True means switch anyway. */
+  private async switchExpiredAnyway(profile: ProfileMeta): Promise<boolean> {
+    const choice = await this.view.confirm({
+      title: `The saved login for "${profile.alias}" has expired`,
+      message: 'Sign in to it again in your browser. Your current login is not affected.',
+      actions: [
+        { id: 'signin', label: 'Sign in again', style: 'primary' },
+        { id: 'switch', label: 'Switch anyway' },
+      ],
+    });
+    if (choice === 'signin') {
+      // Not awaited: signing in takes a while, and switching should not stay blocked meanwhile.
+      void this.addAccount(isValidEmail(profile.email) ? profile.email : undefined);
+    }
+    return choice === 'switch';
+  }
+
+  /** Switches every window, by changing the default login in ~/.claude. */
   private async switchToProfile(profileId: string, skipConfirmInTests?: boolean): Promise<void> {
     const live = await this.refresh();
     const profile = this.store.get(profileId);
@@ -310,26 +545,13 @@ export class RosterController implements vscode.Disposable {
       void this.view.notify('error', 'That account is no longer saved in Claude Switch.');
       return;
     }
-    if (live.kind === 'known' && live.profile.id === profile.id) {
+    const othersChose = [...this.store.chosenAccounts()].some((id) => id !== profile.id);
+    if (live.kind === 'known' && live.profile.id === profile.id && !othersChose) {
       void this.view.notify('info', `"${profile.alias}" is already the active Claude account.`);
       return;
     }
-    if (profile.status === 'needs-relogin') {
-      const choice = await this.view.confirm({
-        title: `The saved login for "${profile.alias}" has expired`,
-        message: 'Sign in to it again in your browser. Your current login is not affected.',
-        actions: [
-          { id: 'signin', label: 'Sign in again', style: 'primary' },
-          { id: 'switch', label: 'Switch anyway' },
-        ],
-      });
-      if (choice === 'signin') {
-        // Not awaited: signing in takes a while, and switching should not stay blocked meanwhile.
-        void this.addAccount(isValidEmail(profile.email) ? profile.email : undefined);
-        return;
-      } else if (choice !== 'switch') {
-        return;
-      }
+    if (profile.status === 'needs-relogin' && !(await this.switchExpiredAnyway(profile))) {
+      return;
     }
     if (live.kind === 'unknown') {
       const choice = await this.view.confirm({
@@ -356,7 +578,7 @@ export class RosterController implements vscode.Disposable {
       vscode.workspace.getConfiguration('claudeRoster').get<boolean>('confirmBeforeSwitch', true)
     ) {
       const choice = await this.view.confirm({
-        title: `Switch Claude to "${profile.alias}"?`,
+        title: this.window.enabled ? `Switch every window to "${profile.alias}"?` : `Switch Claude to "${profile.alias}"?`,
         message: RESTART_DETAIL[mode],
         actions: [{ id: 'switch', label: mode === 'reloadWindow' ? 'Switch and reload' : 'Switch and restart', style: 'primary' }],
       });
@@ -366,9 +588,25 @@ export class RosterController implements vscode.Disposable {
     }
 
     const target = profile;
-    await this.applyAndActivate(`Switching Claude to "${target.alias}"…`, async () => {
+    const title = this.window.enabled ? `Switching every window to "${target.alias}"…` : `Switching Claude to "${target.alias}"…`;
+    await this.applyAndActivate(title, async () => {
+      // Its newest tokens may be in its login folder, if a window used it.
+      const folderLogin = this.window.enabled ? await this.window.folders.read(target.id) : undefined;
+      if (folderLogin) {
+        await this.engine.syncFolder(target.id, folderLogin);
+      }
       const result = await this.engine.switchTo(target.id);
-      if (result.outcome === 'already-active') {
+      if (this.window.enabled) {
+        // Every window now uses the default account; the target's login folder goes, after its tokens are saved.
+        try {
+          await this.store.clearWindowChoices();
+          await this.engine.reconcileFolders(this.window.folders, result.profile.id, new Set(), false);
+        } catch (err) {
+          // The switch itself is done; the next refresh finishes this.
+          this.log.warn(`Switched, but could not tidy up the login folders yet: ${errorMessage(err)}`);
+        }
+      }
+      if (result.outcome === 'already-active' && !othersChose) {
         void this.view.notify('info', `"${target.alias}" is already the active Claude account.`);
         return undefined;
       }
@@ -403,6 +641,14 @@ export class RosterController implements vscode.Disposable {
       }
     } finally {
       this.addingAccount = false;
+    }
+  }
+
+  /** "Sign in again" on an account whose saved login expired: Add Account, with its email filled in. */
+  async signInAgain(profileId: string): Promise<void> {
+    const profile = this.store.get(profileId);
+    if (profile) {
+      await this.addAccount(isValidEmail(profile.email) ? profile.email : undefined);
     }
   }
 
@@ -479,50 +725,78 @@ export class RosterController implements vscode.Disposable {
 
   /** profileId comes from the tab; without it, the tab asks which account. */
   async removeAccount(profileId?: string): Promise<void> {
-    const live = await this.refresh();
-    const activeId = live.kind === 'known' ? live.profile.id : undefined;
+    await this.refresh();
+    const inUse = this.accountsInUse();
+    const busyMessage = (id: string | undefined) =>
+      id === this.windowAccountId()
+        ? `This window uses "${this.store.get(id ?? '')?.alias}", so it can't be removed. Switch this window to another account first.`
+        : `"${this.store.get(id ?? '')?.alias}" is the default account, which windows without their own account use, so it can't be removed. Switch all windows to another account first.`;
     let profile: ProfileMeta | undefined;
     if (profileId) {
       profile = this.store.get(profileId);
-      if (profile?.id === activeId) {
-        void this.view.notify('info', "The active account can't be removed. Switch to another account first.");
+      if (profile && inUse.has(profile.id)) {
+        void this.view.notify('info', busyMessage(profile.id));
         return;
       }
     } else {
-      const candidates = this.store.list().filter((p) => p.id !== activeId);
+      const candidates = this.store.list().filter((p) => !inUse.has(p.id));
       if (candidates.length === 0) {
-        void this.view.notify(
-          'info',
-          activeId ? "The active account can't be removed. Switch to another account first." : 'No accounts are saved yet.',
-        );
+        void this.view.notify('info', inUse.size ? "Accounts in use can't be removed; switch away from them first." : 'No accounts are saved yet.');
         return;
       }
       profile = await this.pickProfile(
         'Which account do you want to remove?',
         candidates,
-        activeId ? 'The active account is not listed; switch away from it to remove it.' : undefined,
+        inUse.size ? 'Accounts in use are not listed; switch away from them to remove them.' : undefined,
       );
     }
     if (!profile) {
       return;
     }
+    const usedElsewhere = this.store.chosenAccounts().has(profile.id);
     const choice = await this.view.confirm({
       title: `Remove "${profile.alias}"?`,
-      message: `The saved login for ${profile.email} and its backups are deleted from this device. Your Anthropic account is not affected.`,
+      message: [
+        `The saved login for ${profile.email} and its backups are deleted from this device. Your Anthropic account is not affected.`,
+        usedElsewhere ? 'Other windows that use it go back to the default account.' : undefined,
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
       actions: [{ id: 'remove', label: 'Remove', style: 'danger' }],
     });
     if (choice !== 'remove') {
       return;
     }
-    const now = await this.refresh();
-    if (now.kind === 'known' && now.profile.id === profile.id) {
-      void this.view.notify('warning', `"${profile.alias}" became the active account, so it was not removed.`);
+    await this.refresh();
+    if (this.accountsInUse().has(profile.id)) {
+      void this.view.notify('warning', `"${profile.alias}" came into use meanwhile, so it was not removed.`);
       return;
     }
     await this.store.remove(profile.id);
+    await this.forgetFolders(profile.id);
     this.log.info(`Removed "${profile.alias}".`);
     await this.refresh();
     void this.view.notify('success', `Removed "${profile.alias}".`);
+  }
+
+  /** The account this window uses, if it is a saved one. */
+  private windowAccountId(): string | undefined {
+    return this.windowLive.kind === 'known' ? this.windowLive.profile.id : undefined;
+  }
+
+  /** This window's account and the default account, neither of which can be removed. */
+  private accountsInUse(): Set<string> {
+    return new Set([this.windowAccountId(), this.live.kind === 'known' ? this.live.profile.id : undefined].filter((id): id is string => !!id));
+  }
+
+  /** Deletes an account's login folder and its usage-check settings folder; all of them without an id. */
+  private async forgetFolders(profileId?: string): Promise<void> {
+    const targets = profileId
+      ? [this.window.folders.dirOf(profileId), path.join(this.storageDir, 'usage', profileId)]
+      : [this.window.folders.root, path.join(this.storageDir, 'usage')];
+    for (const target of targets) {
+      await fs.rm(target, { recursive: true, force: true }).catch((err) => this.log.warn(`Could not delete ${target}: ${errorMessage(err)}`));
+    }
   }
 
   async recapture(): Promise<void> {
@@ -543,7 +817,7 @@ export class RosterController implements vscode.Disposable {
         await this.saveCurrentLogin(live.login.account);
         break;
       case 'signed-out':
-        void this.view.notify('warning', 'Claude Code is not signed in. Sign in with /login first.');
+        void this.view.notify('warning', 'Claude Code is not signed in. Use Add account to sign in.');
         break;
       case 'error':
         this.showError(live.message);
@@ -608,7 +882,7 @@ export class RosterController implements vscode.Disposable {
         void this.view.notify('info', `The current login is already saved as "${live.profile.alias}".`);
         break;
       case 'signed-out':
-        void this.view.notify('warning', 'Claude Code is not signed in. Sign in with /login first.');
+        void this.view.notify('warning', 'Claude Code is not signed in. Use Add account to sign in.');
         break;
       case 'error':
         this.showError(live.message);
@@ -619,23 +893,49 @@ export class RosterController implements vscode.Disposable {
   async restoreBackup(): Promise<void> {
     const latest = this.store.listBackups()[0];
     if (!latest) {
-      void this.view.notify('info', 'There is no backup yet. Claude Switch saves one before every switch.');
+      void this.view.notify('info', 'There is no backup yet. Claude Switch saves one each time the default account changes, with Switch All Windows.');
       return;
     }
     const from = latest.fromProfileId ? this.store.get(latest.fromProfileId)?.alias : undefined;
     const to = latest.toProfileId ? this.store.get(latest.toProfileId)?.alias : undefined;
     const choice = await this.view.confirm({
-      title: 'Restore the login from before the last switch?',
-      message: `Backup taken ${new Date(latest.at).toLocaleString()}, when switching from ${from ? `"${from}"` : 'an unsaved or removed login'} to ${to ? `"${to}"` : 'another account'}.`,
+      title: 'Restore the default login from before the last Switch All Windows?',
+      message: [
+        `Backup taken ${new Date(latest.at).toLocaleString()}, when switching from ${from ? `"${from}"` : 'an unsaved or removed login'} to ${to ? `"${to}"` : 'another account'}.`,
+        this.window.enabled ? 'This changes the default account, which windows without their own account use.' : undefined,
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
       actions: [{ id: 'restore', label: 'Restore', style: 'primary' }],
     });
     if (choice !== 'restore') {
       return;
     }
     await this.applyAndActivate('Restoring the Claude login backup…', async () => {
+      // If a window used the account since, its newest tokens are in its login folder.
+      const folderLogin = this.window.enabled && latest.fromProfileId ? await this.window.folders.read(latest.fromProfileId) : undefined;
+      if (folderLogin && latest.fromProfileId) {
+        await this.engine.syncFolder(latest.fromProfileId, folderLogin);
+      }
       const { profile } = await this.engine.restoreBackup(latest.slot);
       return { alias: profile?.alias, profileId: profile?.id };
     });
+  }
+
+  /**
+   * Shows the loading screen, then reloads this window or restarts its
+   * extensions. If the window is still here a while later, the reload was
+   * cancelled (say, at a prompt to save), so the accounts come back.
+   */
+  private async restartWindow(how: 'reloadWindow' | 'restartExtensions', text: string): Promise<void> {
+    await this.view.showReloading(text);
+    await (how === 'reloadWindow' ? this.reloadWindow() : this.restartExtensions());
+    setTimeout(() => void this.refresh(), RELOAD_GIVE_UP_MS);
+  }
+
+  /** The Reload button on the banner and status bar, after this window's account changed elsewhere. */
+  async reloadNow(): Promise<void> {
+    await this.restartWindow(switchMode() === 'restartExtensions' ? 'restartExtensions' : 'reloadWindow', 'Reloading…');
   }
 
   /** Opens the activity log page in the Claude Switch tab. */
@@ -646,47 +946,66 @@ export class RosterController implements vscode.Disposable {
   async forgetAll(): Promise<void> {
     const choice = await this.view.confirm({
       title: 'Remove all accounts and backups?',
-      message: 'Every login Claude Switch saved is deleted from this device. The login Claude Code is using right now stays as it is.',
+      message:
+        'Every login Claude Switch saved is deleted from this device, and every window goes back to the default login in ~/.claude, which stays as it is.',
       actions: [{ id: 'remove', label: 'Remove all', style: 'danger' }],
     });
     if (choice !== 'remove') {
       return;
     }
     await this.store.clearAll();
+    await this.forgetFolders();
     this.log.info('Removed all saved accounts and backups.');
     await this.refresh();
     void this.view.notify('success', 'Removed all saved accounts and backups.');
   }
 
   /**
-   * Another window switched accounts. New Claude conversations here pick up the
-   * new login on their own; only the restarting modes ask this window to reload.
+   * Another window changed the default account. Windows with their own account
+   * are unaffected, unless the change took that away, in which case refresh()
+   * asks them to reload. Windows on the default account: the restarting modes
+   * ask to reload; in the instant modes, new conversations pick the login up.
    */
   async onRemoteSwitch(signal: SwitchSignal): Promise<void> {
     // The user chose another account on purpose; this window's watch no longer applies.
     this.watch = undefined;
+    await this.refresh();
+    if (this.windowFolderId || this.reloadPending) {
+      return;
+    }
     const mode = switchMode();
     if (mode === 'restartExtensions' || mode === 'reloadWindow') {
       this.reloadPending = { alias: signal.alias };
+      this.render();
+      return;
     }
-    await this.refresh();
-    if (!this.reloadPending) {
-      void this.view.notify(
-        'info',
-        `Switched to ${signal.alias ? `"${signal.alias}"` : 'another account'} in another window. New Claude conversations here use it too.`,
-      );
-    }
+    void this.view.notify(
+      'info',
+      `Switched to ${signal.alias ? `"${signal.alias}"` : 'another account'} in another window. New Claude conversations here use it too.`,
+    );
   }
 
   dispose(): void {
     this.stopAutoRefresh();
+    clearInterval(this.usageTimer);
     this.signIn?.cli.cancel();
   }
 
   private render(): void {
-    this.statusBar.update(this.live, this.reloadPending);
+    this.statusBar.update(this.windowLive, this.reloadPending);
     const signIn = this.signIn && { email: this.signIn.email, url: this.signIn.cli.url };
-    this.view.update(this.live, this.reloadPending, signIn, this.switching);
+    // When this window has its own account, say which one the other windows use by default.
+    let windowNote: string | undefined;
+    if (this.windowFolderId) {
+      if (this.live.kind === 'known') {
+        windowNote = `Other windows use ${this.live.profile.alias} unless you switch them.`;
+      } else if (this.live.kind === 'unknown') {
+        windowNote = `Other windows use ${this.live.login.account.emailAddress}, which isn't saved, unless you switch them.`;
+      } else if (this.live.kind === 'signed-out') {
+        windowNote = "Other windows aren't signed in to Claude unless you switch them.";
+      }
+    }
+    this.view.update(this.windowLive, this.reloadPending, signIn, this.switching, windowNote, this.window.enabled);
   }
 
   /** Swaps the login, then makes Claude Code use it as claudeRoster.switchMode says. */
@@ -714,7 +1033,7 @@ export class RosterController implements vscode.Disposable {
     const mode = switchMode();
     if (mode === 'reloadWindow' || mode === 'restartExtensions') {
       await this.refresh();
-      await (mode === 'reloadWindow' ? this.reloadWindow() : this.restartExtensions());
+      await this.restartWindow(mode, applied.alias ? `Switching to ${applied.alias}…` : 'Reloading…');
       return;
     }
 
@@ -821,17 +1140,38 @@ export class RosterController implements vscode.Disposable {
 
     if (failure) {
       this.log.error(`Add Account: ${failure}`);
-      const choice = await this.view.notify('error', failure, [
-        { id: 'terminal', label: 'Sign in in a terminal' },
-        { id: 'log', label: 'Show log' },
-      ]);
-      if (choice === 'terminal') {
-        return this.signInInTerminal(claude.command);
-      } else if (choice === 'log') {
-        this.showLog();
-      }
+      // Not awaited: the notice stays until dismissed, and Add Account must not stay busy meanwhile.
+      void this.view
+        .notify('error', failure, [
+          { id: 'terminal', label: 'Sign in in a terminal' },
+          { id: 'log', label: 'Show log' },
+        ])
+        .then((choice) => {
+          if (choice === 'terminal') {
+            void this.addAccountInTerminal(claude.command);
+          } else if (choice === 'log') {
+            this.showLog();
+          }
+        });
     }
     return login;
+  }
+
+  /** The terminal fallback offered when the background sign-in fails. */
+  private async addAccountInTerminal(command: string): Promise<void> {
+    if (this.addingAccount) {
+      this.view.reveal();
+      return;
+    }
+    this.addingAccount = true;
+    try {
+      const login = await this.signInInTerminal(command);
+      if (login) {
+        await this.saveSignedInLogin(login);
+      }
+    } finally {
+      this.addingAccount = false;
+    }
   }
 
   /**
@@ -845,8 +1185,14 @@ export class RosterController implements vscode.Disposable {
       name: 'Claude Switch: Sign In',
       shellPath: command,
       cwd: dir,
-      // null removes the variable, so an API key in the environment can't replace the sign-in.
-      env: { CLAUDE_CONFIG_DIR: dir, ANTHROPIC_API_KEY: null, ANTHROPIC_AUTH_TOKEN: null, CLAUDE_CODE_OAUTH_TOKEN: null },
+      // null removes a variable: an API key can't replace the sign-in, and the window's login folder can't catch it.
+      env: {
+        CLAUDE_CONFIG_DIR: dir,
+        [LOGIN_DIR_VARIABLE]: null,
+        ANTHROPIC_API_KEY: null,
+        ANTHROPIC_AUTH_TOKEN: null,
+        CLAUDE_CODE_OAUTH_TOKEN: null,
+      },
       iconPath: new vscode.ThemeIcon('account'),
       isTransient: true,
     });
@@ -919,6 +1265,11 @@ export class RosterController implements vscode.Disposable {
     this.log.info(`Replaced the saved login for "${existing.alias}".`);
     const live = await this.refresh();
     if (live.kind !== 'known' || live.profile.id !== existing.id) {
+      // Windows that use it through its login folder get the new sign-in for their next Claude conversations.
+      if (this.window.enabled && this.window.folders.has(existing.id)) {
+        await this.window.folders.write(existing.id, login.credentialsRaw);
+        this.log.info(`Gave the windows that use "${existing.alias}" the new sign-in.`);
+      }
       void this.view.notify('success', `Updated the saved login for "${existing.alias}".`);
       return;
     }
@@ -991,7 +1342,8 @@ export class RosterController implements vscode.Disposable {
     return candidate;
   }
 
-  private showError(err: unknown): void {
+  /** Shows an error in the tab, with a button to the log. Also for errors from clicks and commands. */
+  showError(err: unknown): void {
     const message = typeof err === 'string' ? err : errorMessage(err);
     this.log.error(message);
     void this.view.notify('error', message, [{ id: 'log', label: 'Show log' }]).then((choice) => {
@@ -1000,6 +1352,14 @@ export class RosterController implements vscode.Disposable {
       }
     });
   }
+}
+
+/**
+ * A window's own account, in the shape the status bar and the tab take. For a
+ * saved account they show only the profile, so the login is left empty.
+ */
+function profileLive(profile: ProfileMeta): LiveState {
+  return { kind: 'known', profile, login: { credentialsRaw: '', account: { accountUuid: '', emailAddress: profile.email } } };
 }
 
 /**

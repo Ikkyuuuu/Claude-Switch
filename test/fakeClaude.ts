@@ -71,6 +71,10 @@ function signIn(): void {
     process.stderr.write('error: ANTHROPIC_API_KEY should have been removed\n');
     process.exit(3);
   }
+  if (process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR) {
+    process.stderr.write('error: CLAUDE_SECURESTORAGE_CONFIG_DIR should have been removed\n');
+    process.exit(4);
+  }
 
   const emailIndex = args.indexOf('--email');
   const name = emailIndex >= 0 ? args[emailIndex + 1].split('@')[0] : 'New';

@@ -41,6 +41,8 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
 
   private view: vscode.WebviewView | undefined;
   private current: RosterViewState;
+  /** False until the controller's first update: before it, the tab shows its loading screen. */
+  private loaded: boolean;
   private badge: vscode.ViewBadge | undefined;
   private description: string | undefined;
   private readonly shown = new vscode.EventEmitter<void>();
@@ -73,6 +75,7 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
     this.current = store
       ? buildViewState({ profiles: store.list(), live: { kind: 'signed-out' }, hasBackup: false })
       : unsupportedState();
+    this.loaded = !store;
     // Several entries often arrive together; send them in one message.
     this.stopWatchingLog = log.onDidChange(() => {
       this.logTimer ??= setTimeout(() => {
@@ -162,6 +165,19 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
         setTimeout(() => this.closeNotice(notice.id), actions.length ? NOTICE_WITH_ACTIONS_MS : NOTICE_MS);
       }
     });
+  }
+
+  /**
+   * Before a reload or restart: the tab shows its loading screen with this
+   * text, and keeps it across the reload until the accounts are back.
+   */
+  async showReloading(text: string): Promise<void> {
+    const message: HostMessage = { type: 'reloading', text };
+    // If the reload does not happen after all, the next update must reach the tab even if nothing changed.
+    this.lastPosted = '';
+    await this.view?.webview.postMessage(message);
+    // Lets the webview save the text before the window goes down.
+    await new Promise((resolve) => setTimeout(resolve, 150));
   }
 
   /** Shows a banner while the task runs. Tasks can overlap; each one's banner stays until it ends. */
@@ -301,10 +317,22 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
     }
   }
 
-  update(live: LiveState, reloadPending?: { alias?: string }, signIn?: SignInState, switching = false): void {
+  /**
+   * windowNote: set when this window has its own account; says which account other windows use.
+   * perWindow: false when every switch is for all windows (the user set the login folder variable).
+   */
+  update(
+    live: LiveState,
+    reloadPending?: { alias?: string },
+    signIn?: SignInState,
+    switching = false,
+    windowNote?: string,
+    perWindow = true,
+  ): void {
     if (!this.store) {
       return;
     }
+    this.loaded = true;
     const profiles = this.store.list();
     this.current = buildViewState({
       profiles,
@@ -313,6 +341,8 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
       signIn,
       hasBackup: this.store.listBackups().length > 0,
       switching,
+      windowNote,
+      perWindow,
     });
 
     this.description = live.kind === 'known' ? live.profile.alias : undefined;
@@ -356,6 +386,9 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
 
   /** Sends the state, unless the webview already shows exactly this (auto-refresh repeats often). */
   private post(force = false): void {
+    if (!this.loaded) {
+      return;
+    }
     const json = JSON.stringify(this.current);
     if (!force && json === this.lastPosted) {
       return;

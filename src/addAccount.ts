@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { delay, errorCode, readSnapshot, resolvePaths, sameSnapshot, SavedLogin, toSavedLogin } from './claudeFiles';
 import { errorMessage, redact } from './log';
+import { LOGIN_DIR_VARIABLE } from './windowAccounts';
 import { isValidEmail } from './webview/rules';
 
 /**
@@ -157,7 +158,13 @@ export class ClaudeLogin {
       '--claudeai',
       ...(options.email ? ['--email', options.email] : []),
     ];
+    // The window's own login folder, if any, must not catch the new sign-in either.
     const env = withoutAuthOverrides({ ...(options.env ?? process.env), CLAUDE_CONFIG_DIR: options.dir });
+    for (const key of Object.keys(env)) {
+      if (key.toUpperCase() === LOGIN_DIR_VARIABLE) {
+        delete env[key];
+      }
+    }
     // Node only starts .cmd/.bat files (an npm-installed claude) through a shell.
     // The arguments are fixed words plus a validated email, so nothing needs escaping.
     this.viaShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(options.command);

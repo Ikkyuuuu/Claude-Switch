@@ -21,6 +21,8 @@ export interface ViewInput {
   signIn?: SignInState;
   hasBackup: boolean;
   switching?: boolean;
+  windowNote?: string;
+  perWindow?: boolean;
   /** For renewal dates; defaults to the current time. */
   now?: number;
 }
@@ -55,6 +57,8 @@ export function buildViewState(input: ViewInput): RosterViewState {
     signIn: input.signIn && { email: input.signIn.email, hasLink: !!input.signIn.url },
     hasBackup: input.hasBackup,
     ...(input.switching && { switching: true }),
+    ...(input.windowNote && { windowNote: input.windowNote }),
+    ...(input.perWindow === false && { perWindow: false }),
   };
 }
 
@@ -127,7 +131,7 @@ const SIMPLE_MESSAGES = new Set([
   'signInCancel',
   'openBilling',
 ]);
-const PROFILE_MESSAGES = new Set(['switch', 'rename', 'remove', 'setRenewal']);
+const PROFILE_MESSAGES = new Set(['switch', 'rename', 'remove', 'setRenewal', 'signInAgain']);
 
 /** Validates a message from the webview. Anything unexpected returns undefined. */
 export function parseMessage(raw: unknown): WebviewMessage | undefined {

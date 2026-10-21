@@ -53,6 +53,10 @@ export interface RosterViewState {
   hasBackup: boolean;
   /** A switch is under way; the account list waits. */
   switching?: boolean;
+  /** Set when this window has its own account: which account other windows use. */
+  windowNote?: string;
+  /** False when every switch is for all windows: the user set CLAUDE_SECURESTORAGE_CONFIG_DIR. */
+  perWindow?: boolean;
 }
 
 /** Webview to extension. */
@@ -62,6 +66,8 @@ export type WebviewMessage =
   | { type: 'rename'; profileId: string }
   | { type: 'remove'; profileId: string }
   | { type: 'setRenewal'; profileId: string }
+  /** "Sign in again" on an account whose saved login expired. */
+  | { type: 'signInAgain'; profileId: string }
   | { type: 'openBilling' }
   | { type: 'add' }
   | { type: 'saveCurrent' }
@@ -142,4 +148,6 @@ export type HostMessage =
   | { type: 'prompt'; prompt: PromptSpec | null }
   | { type: 'notices'; notices: Notice[] }
   /** Work in progress, shown as a banner; null when done. */
-  | { type: 'busy'; text: string | null };
+  | { type: 'busy'; text: string | null }
+  /** The window is about to reload or restart: show the loading screen, with this text, until it is back. */
+  | { type: 'reloading'; text: string };

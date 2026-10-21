@@ -328,7 +328,8 @@ body {
 }
 
 .renewal-text {
-  flex: 1;
+  /* Wide enough for the date and its tag; in a narrow sidebar the links wrap below instead. */
+  flex: 1 1 9em;
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
@@ -484,13 +485,47 @@ body {
   opacity: 0.55;
 }
 
+.window-note {
+  margin: 8px 2px 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
 .row.waiting .row-end {
   display: none;
 }
 
-.row:focus-visible {
+/* The row's own button, invisible, over the whole row; Edit and Remove sit above it. */
+.row-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  cursor: inherit;
+}
+
+.row-hit:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: -1px;
+}
+
+.row-end {
+  z-index: 1;
+}
+
+/* For screen readers only. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 .row-text {
@@ -1607,4 +1642,40 @@ body.vscode-high-contrast .row,
 body.vscode-high-contrast .current.account {
   border: 1px solid var(--vscode-contrastBorder);
   background: transparent;
+}
+
+/* ------------------------------------------------------------ loading screen */
+/* Until the extension sends the accounts: a spinner in the middle of the tab, and what is happening. */
+
+.loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 160px;
+  text-align: center;
+}
+
+.spinner.large {
+  width: 32px;
+  height: 32px;
+  border-width: 3px;
+}
+
+.loading-hint {
+  margin: 0;
+  max-width: 260px;
+  color: var(--muted);
+  font-size: 11.5px;
+  opacity: 0.85;
+}
+
+.loading-text {
+  margin: 0;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
 }

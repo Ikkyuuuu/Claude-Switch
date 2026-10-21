@@ -93,6 +93,31 @@ suite('ProfileStore', () => {
     assert.equal(state.data.size, 0);
   });
 
+  test("remembers each window's account until it is removed or expires", async () => {
+    const a = await store.add('Work', fakeLogin('A'));
+    const b = await store.add('Personal', fakeLogin('B'));
+    await store.setWindowChoice('window-1', a.id);
+    await store.setWindowChoice('window-2', b.id);
+    assert.equal(store.getWindowChoice('window-1')?.profileId, a.id);
+    assert.deepEqual([...store.chosenAccounts()].sort(), [a.id, b.id].sort());
+
+    // Unused for more than 30 days: forgotten.
+    assert.deepEqual([...store.chosenAccounts(Date.now() + 31 * 24 * 60 * 60_000)], []);
+    assert.equal(store.getWindowChoice('window-1', Date.now() + 31 * 24 * 60 * 60_000), undefined);
+
+    // Removing an account sends its windows back to the default account.
+    await store.remove(b.id);
+    assert.equal(store.getWindowChoice('window-2'), undefined);
+    assert.deepEqual([...store.chosenAccounts()], [a.id]);
+
+    await store.setWindowChoice('window-1', undefined);
+    assert.equal(store.getWindowChoice('window-1'), undefined);
+
+    await store.setWindowChoice('window-1', a.id);
+    await store.clearWindowChoices();
+    assert.deepEqual([...store.chosenAccounts()], []);
+  });
+
   test('does not write when nothing changes', async () => {
     const a = await store.add('Work', fakeLogin('A'));
     let writes = 0;

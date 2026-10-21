@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { PlanInfo, RenewalSetting, UsageInfo } from './accountDetails';
 import { identityOf, LoginSnapshot, OAuthAccount, SavedLogin } from './claudeFiles';
+import type { WindowChoice } from './windowAccounts';
 
 /** The subset of vscode.Memento that Claude Switch uses (globalState). */
 export interface KeyValueStore {
@@ -56,6 +57,10 @@ const BACKUPS_KEY = 'roster.backups';
 /** Written by versions before 0.9; only cleared now. */
 const DISMISSED_KEY = 'roster.dismissedIdentities';
 const LAST_SWITCH_KEY = 'roster.lastSwitch';
+/** The account each window (workspace) chose, by window key. */
+const WINDOWS_KEY = 'roster.windowAccounts';
+/** A window's choice not used for this long is forgotten, and its login folder goes away. */
+const WINDOW_CHOICE_TTL_MS = 30 * 24 * 60 * 60_000;
 export const MAX_BACKUPS = 3;
 const MAX_WRITE_ATTEMPTS = 3;
 /** How long globalState can show an older value after this window writes. See read(). */
@@ -175,7 +180,36 @@ export class ProfileStore {
       await this.secrets.delete(backupKey(backup.slot));
     }
     await this.mutate<BackupMeta[]>(BACKUPS_KEY, (backups = []) => backups.filter((b) => !isTheirs(b)));
+    await this.mutate<Record<string, WindowChoice>>(WINDOWS_KEY, (choices = {}) =>
+      Object.fromEntries(Object.entries(choices).filter(([, choice]) => choice.profileId !== id)),
+    );
     await this.mutate<ProfileMeta[]>(PROFILES_KEY, (profiles = []) => profiles.filter((p) => p.id !== id));
+  }
+
+  /** The account a window chose, while that account is still saved and the choice has not expired. */
+  getWindowChoice(windowKey: string, now = Date.now()): WindowChoice | undefined {
+    const choice = this.read<Record<string, WindowChoice>>(WINDOWS_KEY)?.[windowKey];
+    return choice && now - choice.at < WINDOW_CHOICE_TTL_MS && this.get(choice.profileId) ? choice : undefined;
+  }
+
+  /** Records the account a window uses; undefined goes back to the default account. Also drops expired choices. */
+  async setWindowChoice(windowKey: string, profileId: string | undefined): Promise<void> {
+    const now = Date.now();
+    await this.mutate<Record<string, WindowChoice>>(WINDOWS_KEY, (choices = {}) => {
+      const kept = Object.entries(choices).filter(([key, choice]) => key !== windowKey && now - choice.at < WINDOW_CHOICE_TTL_MS);
+      return Object.fromEntries(profileId ? [...kept, [windowKey, { profileId, at: now }]] : kept);
+    });
+  }
+
+  /** Accounts that some window chose, within WINDOW_CHOICE_TTL_MS. */
+  chosenAccounts(now = Date.now()): Set<string> {
+    const choices = Object.values(this.read<Record<string, WindowChoice>>(WINDOWS_KEY) ?? {});
+    return new Set(choices.filter((c) => now - c.at < WINDOW_CHOICE_TTL_MS && this.get(c.profileId)).map((c) => c.profileId));
+  }
+
+  /** Every window goes back to the default account. */
+  async clearWindowChoices(): Promise<void> {
+    await this.mutate(WINDOWS_KEY, () => undefined);
   }
 
   /** Most recent first. */
@@ -234,7 +268,7 @@ export class ProfileStore {
     for (let slot = 0; slot < MAX_BACKUPS; slot++) {
       await this.secrets.delete(backupKey(slot));
     }
-    for (const key of [PROFILES_KEY, BACKUPS_KEY, DISMISSED_KEY, LAST_SWITCH_KEY]) {
+    for (const key of [PROFILES_KEY, BACKUPS_KEY, DISMISSED_KEY, LAST_SWITCH_KEY, WINDOWS_KEY]) {
       await this.mutate(key, () => undefined);
     }
   }

@@ -11,6 +11,7 @@ import {
   errorCode,
   identityOf,
   LoginSnapshot,
+  OAuthAccount,
   readSnapshot,
   readTextIfExists,
   refreshTokenExpiry,
@@ -23,6 +24,7 @@ import {
 } from './claudeFiles';
 import { errorMessage, Logger } from './log';
 import { BackupMeta, ProfileMeta, ProfileStore } from './profileStore';
+import type { LoginFolders } from './windowAccounts';
 
 export type Step = 'read' | 'sync-back' | 'backup' | 'apply-credentials' | 'apply-account' | 'validate';
 
@@ -76,6 +78,8 @@ export class LockBusyError extends Error {
 }
 
 const LOCK_STALE_MS = 2 * 60_000;
+/** How long a login folder that no window uses is kept after Claude last wrote to it. See reconcileFolders(). */
+const FOLDER_IDLE_MS = 24 * 60 * 60_000;
 const LOCK_WAIT_MS = 20_000;
 const LOCK_RETRY_MS = 150;
 const LAST_SWITCH_WINDOW_MS = 10 * 60_000;
@@ -87,6 +91,14 @@ export class SwitchEngine {
    * is newer. Until the live login changes, refresh() has nothing to do.
    */
   private declinedLive: string | undefined;
+
+  /**
+   * Whether Claude Code's usage cache in .claude.json can be trusted. Claude
+   * labels it with the default account even when a window's Claude used
+   * another account's login, so the controller turns this off while any window
+   * has its own account; usage then comes from usage checks alone.
+   */
+  usageCacheTrusted = true;
 
   constructor(
     private readonly paths: ClaudePaths,
@@ -220,8 +232,12 @@ export class SwitchEngine {
         await this.syncBack(live);
       }
 
-      await this.applyVerified(snapshot, before);
+      // The account may have been used since, in a window's login folder or here, and its
+      // refresh token replaced: then the backup's tokens no longer work, and the saved ones do.
       const profile = snapshot.account ? this.store.findByAccount(snapshot.account) : undefined;
+      const saved = profile ? await this.store.getLogin(profile.id) : undefined;
+      const restore = saved && snapshot.credentialsRaw && newerLogin(saved.credentialsRaw, snapshot.credentialsRaw) ? { ...snapshot, credentialsRaw: saved.credentialsRaw } : snapshot;
+      await this.applyVerified(restore, before);
       if (profile) {
         await this.store.markUsed(profile.id);
         await this.store.setLastSwitch({ profileId: profile.id, at: this.now() });
@@ -283,22 +299,30 @@ export class SwitchEngine {
   }
 
   /**
-   * Gets the live account's current usage from Claude (see usageCheck.ts) and
-   * keeps it with that account. Holds the switch lock while Claude runs, so no
-   * switch in any window changes the login meanwhile; a switch waits for it.
-   * Returns false when there was nothing to check, or the login changed anyway.
+   * Gets an account's current usage from Claude (see usageCheck.ts) and keeps
+   * it with that account. Without folderProfileId, the account is the default
+   * one in ~/.claude; with it, the account whose login folder Claude was given.
+   * Holds the switch lock while Claude runs, so no switch in any window changes
+   * the login meanwhile; a switch waits for it. Returns false when there was
+   * nothing to check, or the login changed anyway.
    */
-  async checkUsage(ask: () => Promise<unknown>): Promise<boolean> {
+  async checkUsage(ask: () => Promise<unknown>, folderProfileId?: string): Promise<boolean> {
     return this.withLock(async () => {
-      const live = this.classify(await this.readStable());
-      if (live.kind !== 'known') {
-        return false;
+      let profileId = folderProfileId;
+      let account: OAuthAccount | undefined;
+      if (!profileId) {
+        const live = this.classify(await this.readStable());
+        if (live.kind !== 'known') {
+          return false;
+        }
+        profileId = live.profile.id;
+        account = live.login.account;
       }
       const usage = usageFromUtilization(await ask(), this.now());
-      // Claude Code's /login could still have changed the account.
-      const after = await readSnapshot(this.paths);
-      const profile = this.store.get(live.profile.id);
-      if (!usage || !profile || !sameAccount(after.account, live.login.account)) {
+      // Claude Code's /login could still have changed the default account.
+      const unchanged = !account || sameAccount((await readSnapshot(this.paths)).account, account);
+      const profile = this.store.get(profileId);
+      if (!usage || !profile || !unchanged) {
         return false;
       }
       if (usage.fetchedAt > (profile.usage?.fetchedAt ?? 0)) {
@@ -306,6 +330,92 @@ export class SwitchEngine {
       }
       return true;
     }, 0);
+  }
+
+  /**
+   * Keeps each account's login in exactly one place (see windowAccounts.ts):
+   * creates the login folders that windows need, and, after saving their newest
+   * tokens, removes the default account's folder, whose login lives in
+   * ~/.claude, and folders no window has used for FOLDER_IDLE_MS. Background
+   * callers skip their turn while another window holds the lock.
+   */
+  async reconcileFolders(folders: LoginFolders, defaultId: string | undefined, chosen: Set<string>, background = true): Promise<void> {
+    const plan = async () => {
+      const create: { id: string; login: SavedLogin }[] = [];
+      for (const id of chosen) {
+        const login = id !== defaultId && !folders.has(id) ? await this.store.getLogin(id) : undefined;
+        if (login) {
+          create.push({ id, login });
+        }
+      }
+      const remove: string[] = [];
+      for (const id of await folders.list()) {
+        if (id !== defaultId && chosen.has(id) && this.store.get(id)) {
+          continue;
+        }
+        // A folder that no window uses stays while Claude conversations opened on it may still refresh their login into it.
+        const idle = this.now() - ((await folders.modifiedAt(id)) ?? 0) >= FOLDER_IDLE_MS;
+        if (id === defaultId || !this.store.get(id) || idle) {
+          remove.push(id);
+        }
+      }
+      return { create, remove };
+    };
+    // Usually all is in order; then skip the lock, since this runs on every refresh.
+    const first = await plan();
+    if (first.create.length === 0 && first.remove.length === 0) {
+      return;
+    }
+    await this.withLock(
+      async () => {
+        const { create, remove } = await plan();
+        for (const { id, login } of create) {
+          await folders.write(id, login.credentialsRaw);
+          this.log.info(`Created the login folder for "${this.store.get(id)?.alias ?? id}".`);
+        }
+        for (const id of remove) {
+          const raw = await folders.read(id);
+          if (raw && this.store.get(id)) {
+            await this.syncFolder(id, raw);
+          }
+          await folders.remove(id);
+          this.log.info(`Removed the login folder for "${this.store.get(id)?.alias ?? 'a removed account'}".`);
+        }
+      },
+      background ? 0 : undefined,
+    );
+  }
+
+  /**
+   * Saves the tokens Claude refreshed in an account's login folder, with the
+   * same checks as for ~/.claude: the right organization, not another
+   * account's tokens, and not older than what is saved.
+   */
+  async syncFolder(profileId: string, credentialsRaw: string): Promise<void> {
+    const profile = this.store.get(profileId);
+    const saved = await this.store.getLogin(profileId);
+    if (!profile || !saved || saved.credentialsRaw === credentialsRaw) {
+      return;
+    }
+    try {
+      if (!credentialsMatchAccount(credentialsRaw, saved.account)) {
+        this.log.warn(`Not saving the login folder of "${profile.alias}": its tokens belong to another organization.`);
+        return;
+      }
+      if (await this.belongsToAnotherProfile(profileId, credentialsRaw)) {
+        return;
+      }
+      const savedExpiry = accessTokenExpiry(saved.credentialsRaw);
+      const folderExpiry = accessTokenExpiry(credentialsRaw);
+      if (savedExpiry !== undefined && folderExpiry !== undefined && folderExpiry < savedExpiry) {
+        return;
+      }
+    } catch {
+      // Unreadable tokens are never saved.
+      return;
+    }
+    await this.store.updateLogin(profileId, { credentialsRaw, account: saved.account });
+    this.log.info(`Saved the refreshed login for "${profile.alias}".`);
   }
 
   /** Whether the live login is still `target`'s; repairs it when only oauthAccount changed. Call under the lock. */
@@ -353,7 +463,7 @@ export class SwitchEngine {
 
   /** Keeps Claude Code's cached /usage numbers with the account they belong to. */
   private async captureUsage(live: LiveState): Promise<void> {
-    if (live.kind !== 'known') {
+    if (live.kind !== 'known' || !this.usageCacheTrusted) {
       return;
     }
     const cache = await readUsageCache(this.paths);
@@ -569,4 +679,15 @@ function isRunning(pid: number): boolean {
 /** For remembering a login without keeping its tokens around. */
 function hashOf(text: string): string {
   return createHash('sha256').update(text).digest('hex');
+}
+
+/** Whether login `a` was issued after login `b`, by when their access tokens expire. */
+function newerLogin(a: string, b: string): boolean {
+  try {
+    const expiryA = accessTokenExpiry(a);
+    const expiryB = accessTokenExpiry(b);
+    return expiryA !== undefined && expiryB !== undefined && expiryA > expiryB;
+  } catch {
+    return false;
+  }
 }

@@ -5,9 +5,9 @@ import * as path from 'node:path';
 
 /** Where Claude Code keeps the two files that make up a login. */
 export interface ClaudePaths {
-  /** Folder that holds .credentials.json. */
+  /** Claude's config folder: ~/.claude, or CLAUDE_CONFIG_DIR. */
   configDir: string;
-  /** Login tokens. Documented for Linux and Windows. */
+  /** Login tokens: in configDir, or in CLAUDE_SECURESTORAGE_CONFIG_DIR when the user set that. */
   credentialsFile: string;
   /** Global config; its oauthAccount key holds the signed-in identity. */
   globalConfigFile: string;
@@ -52,12 +52,16 @@ const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
 const RENAME_ATTEMPTS = 8;
 
 export function resolvePaths(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir()): ClaudePaths {
+  // Claude reads its login from CLAUDE_SECURESTORAGE_CONFIG_DIR when that is set (empty means ~/.claude).
+  const loginDir = env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  const credentialsIn = (configDir: string) =>
+    path.join(loginDir === undefined ? configDir : loginDir.trim() ? path.resolve(loginDir.trim()) : path.join(home, '.claude'), CREDENTIALS_NAME);
   const custom = env.CLAUDE_CONFIG_DIR?.trim();
   if (custom) {
     const dir = path.resolve(custom);
     return {
       configDir: dir,
-      credentialsFile: path.join(dir, CREDENTIALS_NAME),
+      credentialsFile: credentialsIn(dir),
       globalConfigFile: path.join(dir, GLOBAL_CONFIG_NAME),
       fromEnv: true,
     };
@@ -65,7 +69,7 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env, home: string 
   const dir = path.join(home, '.claude');
   return {
     configDir: dir,
-    credentialsFile: path.join(dir, CREDENTIALS_NAME),
+    credentialsFile: credentialsIn(dir),
     globalConfigFile: path.join(home, GLOBAL_CONFIG_NAME),
     fromEnv: false,
   };

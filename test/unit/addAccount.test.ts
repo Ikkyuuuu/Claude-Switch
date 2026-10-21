@@ -14,7 +14,8 @@ function startFake(dir: string, mode: string, extra: Partial<ClaudeLoginOptions>
     command: process.execPath,
     commandArgs: [FAKE_CLAUDE],
     dir,
-    env: { ...process.env, FAKE_CLAUDE_MODE: mode, ANTHROPIC_API_KEY: 'should-be-removed' },
+    // Both must be removed: the fake CLI fails if either reaches it.
+    env: { ...process.env, FAKE_CLAUDE_MODE: mode, ANTHROPIC_API_KEY: 'should-be-removed', CLAUDE_SECURESTORAGE_CONFIG_DIR: 'window-login-folder' },
     ...extra,
   });
 }
@@ -50,7 +51,7 @@ suite('ClaudeLogin', () => {
     assert.equal(login.account.emailAddress, 'new@example.test');
   });
 
-  test('pre-fills the email and removes API key variables', async () => {
+  test("pre-fills the email, and removes API key variables and the window's login folder", async () => {
     const cli = startFake(dir, 'auto', { email: 'pick@example.test' });
     const login = await waitForLogin(dir, { intervalMs: 20, timeoutMs: 5000 });
     assert.equal(login.account.emailAddress, 'pick@example.test');

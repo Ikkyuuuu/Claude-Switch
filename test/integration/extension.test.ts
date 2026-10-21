@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { ClaudeLogin } from '../../src/addAccount';
 import { readSnapshot } from '../../src/claudeFiles';
 import type { RosterTestApi } from '../../src/extension';
+import type { ProfileMeta } from '../../src/profileStore';
 import type { UsageCheckOptions } from '../../src/usageCheck';
 import type { AccountCard } from '../../src/webview/protocol';
 import { fakeLogin, fakeUsageCache, OTHER_CONFIG, writeLive } from '../fixtures';
@@ -51,6 +52,7 @@ suite('Claude Switch in VS Code', () => {
     const commands = await vscode.commands.getCommands(true);
     const ids = [
       'switch',
+      'switchAll',
       'add',
       'rename',
       'remove',
@@ -72,9 +74,8 @@ suite('Claude Switch in VS Code', () => {
     await vscode.commands.executeCommand('workbench.view.extension.claudeRoster');
   });
 
-  test('shows the live account, and switches instantly from a click in the view', async () => {
+  test('shows the default account and its usage', async () => {
     const work = fakeLogin('Work');
-    const personal = fakeLogin('Personal');
     await writeLive(api.paths, work);
 
     await api.controller.refresh();
@@ -82,7 +83,7 @@ suite('Claude Switch in VS Code', () => {
     assert.deepEqual(api.view.state.current, { kind: 'unsaved', email: 'work@example.test' });
 
     await api.engine.saveCurrent('Work');
-    const personalProfile = await api.store.add('Personal', personal);
+    await api.store.add('Personal', fakeLogin('Personal'));
     await api.controller.refresh();
     assert.match(api.statusText(), /\$\(account\) Work/);
     assert.deepEqual(summary(), { current: 'Work', others: ['Personal'] });
@@ -102,71 +103,133 @@ suite('Claude Switch in VS Code', () => {
         ['weekly', 61],
       ],
     );
+  });
 
-    // The same message a click on the "Personal" card sends. By default nothing
-    // reloads or restarts: a new Claude conversation opens on the new account.
-    api.view.receive({ type: 'switch', profileId: personalProfile.id });
+  test('switches only this window, leaving the default login alone', async () => {
+    const { work, personal } = profiles();
+    const before = await readSnapshot(api.paths);
+
+    // The same message a click on the "Personal" card sends.
+    api.view.receive({ type: 'switch', profileId: personal.id });
     await waitFor(async () => (conversations === 1 ? true : undefined));
     assert.equal(reloads, 0);
-    assert.equal(restarts, 0);
-    await waitFor(async () => (api.view.currentNotices.some((n) => n.level === 'success' && n.text.includes('Switched to "Personal"')) ? true : undefined));
+    await waitFor(async () => (api.view.currentNotices.some((n) => n.text.includes('This window now uses "Personal"')) ? true : undefined));
+    assert.match(api.statusText(), /\$\(account\) Personal/);
+    assert.deepEqual(summary(), { current: 'Personal', others: ['Work'] });
+    assert.equal(api.view.state.windowNote, 'Other windows use Work unless you switch them.');
 
+    // This window's Claude, and its terminals, read Personal's login from its own folder.
+    const dir = api.window.folders.dirOf(personal.id);
+    assert.equal(process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, dir);
+    assert.equal(api.window.loginDir, dir);
+    assert.equal(await api.window.folders.read(personal.id), (await api.store.getLogin(personal.id))?.credentialsRaw);
+    assert.deepEqual(await readSnapshot(api.paths), before, '~/.claude is untouched');
+
+    // Back to the default account: this window uses ~/.claude again. Personal's folder stays a
+    // while, for conversations still open on it to keep their refreshed login.
+    api.view.receive({ type: 'switch', profileId: work.id });
+    await waitFor(async () => (conversations === 2 ? true : undefined));
+    await waitFor(async () => (/\$\(account\) Work/.test(api.statusText()) ? true : undefined));
+    assert.equal(process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, undefined);
+    assert.deepEqual(await api.window.folders.list(), [personal.id]);
+    assert.equal(api.view.state.windowNote, undefined);
+    assert.deepEqual(await readSnapshot(api.paths), before);
+  });
+
+  test("leaves a window with its own account alone when another window changes the default", async () => {
+    const { work, personal } = profiles();
+    await api.controller.switchAccount({ profileId: personal.id });
+    assert.equal(api.window.loginDir, api.window.folders.dirOf(personal.id));
+    // Another window restored a backup, or used a new sign-in for the default account.
+    await api.controller.onRemoteSwitch({ id: 'test-signal', source: 'another-window', alias: 'Work', at: new Date().toISOString() });
+    assert.doesNotMatch(api.statusText(), /Reload/);
+    assert.ok(!api.view.state.reloadPending);
+    assert.equal(api.window.loginDir, api.window.folders.dirOf(personal.id));
+    await api.controller.switchAccount({ profileId: work.id });
+  });
+
+  test('switches every window with Switch All Windows, and repairs write-backs', async () => {
+    const { work, personal } = profiles();
+    const workLogin = await api.store.getLogin(work.id);
+    const personalLogin = await api.store.getLogin(personal.id);
+    assert.ok(workLogin && personalLogin);
+    // This window uses its own account first; Switch All Windows replaces that too.
+    await api.controller.switchAccount({ profileId: personal.id });
+    assert.ok(api.window.loginDir);
+
+    await api.controller.switchAccount({ profileId: personal.id, allWindows: true });
+    await waitFor(async () => (api.view.currentNotices.some((n) => n.level === 'success' && n.text.includes('Switched to "Personal"')) ? true : undefined));
     assert.match(api.statusText(), /\$\(account\) Personal/);
     assert.deepEqual(summary(), { current: 'Personal', others: ['Work'] });
     const live = await readSnapshot(api.paths);
-    assert.equal(live.credentialsRaw, personal.credentialsRaw);
-    assert.equal(live.account?.emailAddress, personal.account.emailAddress);
+    assert.equal(live.credentialsRaw, personalLogin.credentialsRaw);
+    assert.equal(live.account?.emailAddress, personalLogin.account.emailAddress);
+    assert.equal(api.window.loginDir, undefined, 'every window uses ~/.claude again');
+    assert.deepEqual(await api.window.folders.list(), []);
+    assert.equal(api.store.getWindowChoice(api.window.key), undefined);
     assert.equal(api.view.state.hasBackup, true);
 
     // A conversation opened before the switch rewrites .claude.json with its old
     // oauthAccount: put back quietly.
-    await writeLive(api.paths, { credentialsRaw: personal.credentialsRaw, account: work.account });
+    await writeLive(api.paths, { credentialsRaw: personalLogin.credentialsRaw, account: workLogin.account });
     await api.controller.refresh();
-    await waitFor(async () => ((await readSnapshot(api.paths)).account?.emailAddress === personal.account.emailAddress ? true : undefined));
+    await waitFor(async () => ((await readSnapshot(api.paths)).account?.emailAddress === personalLogin.account.emailAddress ? true : undefined));
     await waitFor(async () => (/\$\(account\) Personal/.test(api.statusText()) ? true : undefined));
     assert.ok(!api.view.currentNotices.some((n) => n.level === 'warning'), 'no warning for a repair');
 
     // It refreshes its token and writes the whole old login back: only the user can fix that.
-    await writeLive(api.paths, work);
+    await writeLive(api.paths, workLogin);
     await api.controller.refresh();
     await waitFor(async () => (api.view.currentNotices.some((n) => n.level === 'warning' && n.text.includes('changed back to "Work"')) ? true : undefined));
     assert.match(api.statusText(), /\$\(account\) Work/);
   });
 
-  test('reloads the window by default, and restarts as switchMode says', async () => {
+  test('reloads only this window by default, and restarts as switchMode says', async () => {
     const config = vscode.workspace.getConfiguration('claudeRoster');
-    const personalProfile = api.store.list().find((p) => p.alias === 'Personal');
-    const workProfile = api.store.list().find((p) => p.alias === 'Work');
-    assert.ok(personalProfile && workProfile);
+    const { work, personal } = profiles();
+    const conversationsBefore = conversations;
+    // The tab shows its loading screen, saying what happens, until the window is back.
+    const loadingTexts: string[] = [];
+    const showReloading = api.view.showReloading.bind(api.view);
+    api.view.showReloading = (text) => {
+      loadingTexts.push(text);
+      return showReloading(text);
+    };
     try {
       await config.update('switchMode', undefined, vscode.ConfigurationTarget.Global);
       assert.equal(vscode.workspace.getConfiguration('claudeRoster').inspect('switchMode')?.defaultValue, 'reloadWindow');
-      await vscode.commands.executeCommand('claudeRoster.switch', { profileId: personalProfile.id, skipConfirm: true });
+      await vscode.commands.executeCommand('claudeRoster.switch', { profileId: personal.id, skipConfirm: true });
       assert.equal(reloads, 1);
+      assert.deepEqual(loadingTexts, ['Switching to Personal…']);
       assert.match(api.statusText(), /\$\(account\) Personal/);
+      assert.equal(api.window.loginDir, api.window.folders.dirOf(personal.id), 'set before reloading, and again on startup');
 
       await config.update('switchMode', 'restartExtensions', vscode.ConfigurationTarget.Global);
-      await vscode.commands.executeCommand('claudeRoster.switch', { profileId: workProfile.id, skipConfirm: true });
+      await vscode.commands.executeCommand('claudeRoster.switch', { profileId: work.id, skipConfirm: true });
       assert.equal(restarts, 1);
       assert.equal(reloads, 1);
       assert.match(api.statusText(), /\$\(account\) Work/);
-      assert.equal(conversations, 1, 'no new conversation in the restarting modes');
+      assert.equal(api.window.loginDir, undefined);
+      assert.equal(conversations, conversationsBefore, 'no new conversation in the restarting modes');
+      assert.equal(loadingTexts.length, 2);
     } finally {
+      api.view.showReloading = showReloading;
       await config.update('switchMode', 'newConversation', vscode.ConfigurationTarget.Global);
     }
   });
 
-  test("asks Claude for the active account's current usage", async () => {
-    const before = usageAsks.length;
+  test("asks Claude for the usage of this window's account", async () => {
+    const { work, personal } = profiles();
     usageReply = {
       five_hour: { utilization: 87, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
       seven_day: { utilization: 31, resets_at: new Date(Date.now() + 4 * 86_400_000).toISOString() },
     };
     await api.controller.checkUsage();
-    assert.equal(usageAsks.length, before + 1);
-    const asked = usageAsks[usageAsks.length - 1];
-    // Claude runs in Claude Switch's own folder, never in the workspace.
+    let asked = usageAsks[usageAsks.length - 1];
+    // Claude runs in Claude Switch's own folder, never in the workspace, with settings of its own per account.
     assert.ok(path.isAbsolute(asked.cwd) && /claude-switch-accounts/i.test(asked.cwd), asked.cwd);
+    assert.ok(asked.env?.CLAUDE_CONFIG_DIR?.endsWith(path.join('usage', work.id)), asked.env?.CLAUDE_CONFIG_DIR);
+    assert.equal(asked.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR, api.paths.configDir, "the default account's login");
     assert.deepEqual(
       activeCard()?.usage?.meters.map((m) => [m.key, m.percent]),
       [
@@ -174,40 +237,47 @@ suite('Claude Switch in VS Code', () => {
         ['weekly', 31],
       ],
     );
+
+    // In a window with its own account, Claude gets that account's login, and the numbers go to it.
+    usageReply = { five_hour: { utilization: 12 }, seven_day: { utilization: 3 } };
+    await api.controller.switchAccount({ profileId: personal.id });
+    await api.controller.checkUsage();
+    asked = usageAsks[usageAsks.length - 1];
+    assert.equal(asked.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR, api.window.folders.dirOf(personal.id));
+    assert.equal(api.store.get(personal.id)?.usage?.session?.percent, 12);
+    assert.equal(api.store.get(work.id)?.usage?.session?.percent, 87, "the default account's numbers stay");
+
+    await api.controller.switchAccount({ profileId: work.id });
   });
 
   test('switches once however many times an account is clicked', async () => {
-    const personalProfile = api.store.list().find((p) => p.alias === 'Personal');
-    const workProfile = api.store.list().find((p) => p.alias === 'Work');
-    assert.ok(personalProfile && workProfile);
-    const switched = () => api.log.entries.filter((e) => e.message === 'Switched to "Personal".').length;
+    const { work, personal } = profiles();
+    const switched = () => api.log.entries.filter((e) => e.message === 'Switched this window to "Personal".').length;
     const switchesBefore = switched();
     const conversationsBefore = conversations;
 
     for (let i = 0; i < 5; i++) {
-      api.view.receive({ type: 'switch', profileId: personalProfile.id });
+      api.view.receive({ type: 'switch', profileId: personal.id });
     }
     await waitFor(async () => (/\$\(account\) Personal/.test(api.statusText()) ? true : undefined));
     await new Promise((resolve) => setTimeout(resolve, 1500));
     assert.equal(switched(), switchesBefore + 1);
     assert.equal(conversations, conversationsBefore + 1, 'one new conversation');
+    assert.equal(api.view.state.switching, undefined, 'the list is clickable again');
 
-    // Clicking the account that is already active shows one notice, not one per click.
+    // Clicking the account this window already uses shows one notice, not one per click.
     for (let i = 0; i < 3; i++) {
-      await api.controller.switchAccount({ profileId: personalProfile.id });
+      await api.controller.switchAccount({ profileId: personal.id });
     }
-    assert.equal(api.view.currentNotices.filter((n) => n.text.includes('already the active')).length, 1);
+    assert.equal(api.view.currentNotices.filter((n) => n.text.includes('already uses')).length, 1);
 
-    await api.controller.switchAccount({ profileId: workProfile.id });
+    await api.controller.switchAccount({ profileId: work.id });
     assert.match(api.statusText(), /\$\(account\) Work/);
   });
 
   test('warns once when an older conversation writes back only its tokens', async () => {
-    const personalProfile = api.store.list().find((p) => p.alias === 'Personal');
-    const workProfile = api.store.list().find((p) => p.alias === 'Work');
-    assert.ok(personalProfile && workProfile);
-    await api.controller.switchAccount({ profileId: personalProfile.id });
-    assert.equal(api.view.state.switching, undefined, 'the list is clickable again');
+    const { work, personal } = profiles();
+    await api.controller.switchAccount({ profileId: personal.id, allWindows: true });
 
     // Work's tokens next to Personal's identity: the files no longer agree.
     const refresh = api.engine.refresh.bind(api.engine);
@@ -227,13 +297,14 @@ suite('Claude Switch in VS Code', () => {
       api.engine.refresh = refresh;
     }
 
-    await api.controller.switchAccount({ profileId: workProfile.id });
+    await api.controller.switchAccount({ profileId: work.id, allWindows: true });
     assert.match(api.statusText(), /\$\(account\) Work/);
   });
 
   test('records what happened in the activity log shown in the tab', async () => {
     const messages = api.log.entries.map((e) => e.message);
-    assert.ok(messages.includes('Switched to "Personal".'), messages.join('\n'));
+    assert.ok(messages.includes('Switched this window to "Personal".'), messages.join('\n'));
+    assert.ok(messages.includes('Switched to "Personal".'));
     assert.ok(messages.includes('Switched to "Work".'));
     assert.ok(
       messages.some((m) => m.includes('changed back to "Work"')),
@@ -352,6 +423,13 @@ suite('Claude Switch in VS Code', () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
+  }
+
+  function profiles(): { work: ProfileMeta; personal: ProfileMeta } {
+    const work = api.store.list().find((p) => p.alias === 'Work');
+    const personal = api.store.list().find((p) => p.alias === 'Personal');
+    assert.ok(work && personal);
+    return { work, personal };
   }
 
   function activeCard(): AccountCard | undefined {

@@ -6,6 +6,7 @@ import { ClaudePaths, readSnapshot, SavedLogin } from '../../src/claudeFiles';
 import { silentLogger } from '../../src/log';
 import { ProfileMeta, ProfileStore } from '../../src/profileStore';
 import { acquireLock, LockBusyError, Step, SwitchEngine, SwitchError } from '../../src/switchEngine';
+import { LoginFolders } from '../../src/windowAccounts';
 import {
   fakeLogin,
   fakeUsageCache,
@@ -316,6 +317,69 @@ suite('SwitchEngine', () => {
     setTimeout(() => finishCheck(), 200);
     assert.equal(await check, true);
     assert.equal((await switching).outcome, 'switched');
+  });
+
+  test('gives each chosen account other than the default its own login folder, and nothing else', async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    // Work is the default account (in ~/.claude); windows chose Work and Personal.
+    await engine.reconcileFolders(folders, work.id, new Set([work.id, personal.id]));
+    assert.deepEqual(await folders.list(), [personal.id]);
+    assert.equal(await folders.read(personal.id), loginB.credentialsRaw);
+    assert.equal((await readSnapshot(paths)).credentialsRaw, loginA.credentialsRaw, 'the default login is untouched');
+
+    // Claude refreshed Personal's tokens in its folder; then no window uses Personal any more.
+    const refreshed = fakeLogin('B', { version: 4 });
+    await folders.write(personal.id, refreshed.credentialsRaw);
+    await engine.reconcileFolders(folders, work.id, new Set([work.id]));
+    // Conversations still open on it may refresh their login into it, so it stays a day.
+    assert.deepEqual(await folders.list(), [personal.id]);
+    now += 25 * 60 * 60_000;
+    await engine.reconcileFolders(folders, work.id, new Set([work.id]));
+    assert.deepEqual(await folders.list(), []);
+    assert.equal((await store.getLogin(personal.id))?.credentialsRaw, refreshed.credentialsRaw, 'saved before the folder went');
+  });
+
+  test('restores the newest tokens of a backed-up account that was used since', async () => {
+    await engine.switchTo(personal.id);
+    // Work, in the backup, was then used in a window and its refresh token replaced: the saved login is newer.
+    const refreshedWork = fakeLogin('A', { version: 6 });
+    await store.updateLogin(work.id, refreshedWork);
+    await engine.restoreBackup();
+    assert.equal((await readSnapshot(paths)).credentialsRaw, refreshedWork.credentialsRaw);
+  });
+
+  test("removes the default account's folder, so its login is never in two places", async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    assert.deepEqual(await folders.list(), [personal.id]);
+    // Personal became the default account (Switch All Windows, or /login).
+    await engine.reconcileFolders(folders, personal.id, new Set([personal.id]));
+    assert.deepEqual(await folders.list(), []);
+  });
+
+  test('saves tokens refreshed in a login folder only when they are newer and the right organization', async () => {
+    const newer = fakeLogin('B', { version: 3 }).credentialsRaw;
+    await engine.syncFolder(personal.id, newer);
+    assert.equal((await store.getLogin(personal.id))?.credentialsRaw, newer);
+    // Older than what is saved, another organization's tokens, not JSON.
+    for (const rejected of [fakeLogin('B', { version: 1 }).credentialsRaw, fakeLogin('Z', { version: 9 }).credentialsRaw, 'garbage']) {
+      await engine.syncFolder(personal.id, rejected);
+      assert.equal((await store.getLogin(personal.id))?.credentialsRaw, newer);
+    }
+  });
+
+  test("keeps a usage check's numbers with the account whose login folder Claude used", async () => {
+    const utilization = { five_hour: { utilization: 66 }, seven_day: { utilization: 12 } };
+    assert.equal(await engine.checkUsage(async () => utilization, personal.id), true);
+    assert.equal(store.get(personal.id)?.usage?.session?.percent, 66);
+    assert.equal(store.get(work.id)?.usage, undefined, 'not the default account');
+  });
+
+  test("ignores Claude Code's usage cache while windows use other accounts", async () => {
+    engine.usageCacheTrusted = false;
+    await writeLive(paths, loginA, { ...OTHER_CONFIG, cachedUsageUtilization: fakeUsageCache(loginA.account, Date.now(), 99) });
+    await engine.refresh();
+    assert.equal(store.get(work.id)?.usage, undefined);
   });
 
   test('only one switch runs at a time', async () => {

@@ -7,6 +7,10 @@ export class RosterStatusBar implements vscode.Disposable {
   constructor() {
     this.item = vscode.window.createStatusBarItem('claudeRoster.status', vscode.StatusBarAlignment.Right, 100);
     this.item.name = 'Claude Switch';
+    // Until the first check of the login finishes.
+    this.item.text = '$(sync~spin) Claude Switch';
+    this.item.tooltip = 'Claude Switch is checking which account this window uses…';
+    this.item.command = 'claudeRoster.switch';
     this.item.show();
   }
 
@@ -21,8 +25,8 @@ export class RosterStatusBar implements vscode.Disposable {
 
     if (reloadPending) {
       this.item.text = `$(refresh) Reload for ${plain(reloadPending.alias ?? 'new account')}`;
-      this.item.tooltip = 'The Claude account was switched in another window. Click to reload this window so Claude Code uses it.';
-      this.item.command = 'workbench.action.reloadWindow';
+      this.item.tooltip = "This window's Claude account changed in another window. Click to reload this window, so Claude Code here uses it.";
+      this.item.command = 'claudeRoster.reloadNow';
       this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
       return;
     }
@@ -39,7 +43,7 @@ export class RosterStatusBar implements vscode.Disposable {
         this.item.tooltip = [
           `Claude account: ${alias} (${email})${plan ? `, ${plan.label}` : ''}`,
           usageLine.length ? `Usage: ${usageLine.join(', ')}` : undefined,
-          expired ? 'This login has expired. Run /login in Claude Code to sign in again.' : undefined,
+          expired ? 'This login has expired. Sign in again from the Claude Switch tab.' : undefined,
           'Click to switch accounts.',
         ]
           .filter(Boolean)

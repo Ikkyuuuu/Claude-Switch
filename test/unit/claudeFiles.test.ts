@@ -32,6 +32,17 @@ suite('claudeFiles', () => {
     assert.equal(paths.fromEnv, true);
   });
 
+  test('finds the login in CLAUDE_SECURESTORAGE_CONFIG_DIR when the user set it, as Claude does', () => {
+    const home = path.join('C:', 'Users', 'me');
+    const loginDir = path.resolve('my-logins');
+    const paths = resolvePaths({ CLAUDE_SECURESTORAGE_CONFIG_DIR: loginDir }, home);
+    assert.equal(paths.credentialsFile, path.join(loginDir, '.credentials.json'));
+    assert.equal(paths.globalConfigFile, path.join(home, '.claude.json'), 'only the login moves');
+    // Empty means ~/.claude, even with CLAUDE_CONFIG_DIR elsewhere.
+    const custom = resolvePaths({ CLAUDE_SECURESTORAGE_CONFIG_DIR: '', CLAUDE_CONFIG_DIR: path.resolve('custom-claude') }, home);
+    assert.equal(custom.credentialsFile, path.join(home, '.claude', '.credentials.json'));
+  });
+
   test('reads a missing login as nulls', async () => {
     const { paths } = await makeFakeHome();
     assert.deepEqual(await readSnapshot(paths), { credentialsRaw: null, account: null });
