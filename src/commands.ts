@@ -3,12 +3,12 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { nextRenewal } from './accountDetails';
 import { AccountsView } from './accountsView';
-import { ClaudeLogin, ClaudeLoginOptions, createLoginDir, findOnPath, isValidEmail, removeLoginDir, waitForLogin } from './addAccount';
+import { ClaudeLogin, ClaudeLoginOptions, createLoginDir, findOnPath, isValidEmail, removeLoginDir, removeStaleLoginDirs, waitForLogin } from './addAccount';
 import { delay, identityOf, OAuthAccount, SavedLogin } from './claudeFiles';
 import { errorMessage } from './log';
 import { ProfileMeta, ProfileStore } from './profileStore';
-import { RosterLog } from './rosterLog';
-import { RosterStatusBar } from './statusBar';
+import { SwitchLog } from './switchLog';
+import { SwitchStatusBar } from './statusBar';
 import { LiveState, LockBusyError, SwitchEngine } from './switchEngine';
 import { askClaudeForUsage, forgetSavedUsage, UsageCheckOptions, usageCheckDue } from './usageCheck';
 import { accountForProject, LOGIN_DIR_VARIABLE, LoginFolders } from './windowAccounts';
@@ -69,12 +69,12 @@ type SwitchMode = 'newConversation' | 'instant' | 'restartExtensions' | 'reloadW
  * the Claude CLI for a few seconds, so not more often than every 10 seconds.
  */
 function usageCheckSeconds(): number {
-  const seconds = vscode.workspace.getConfiguration('claudeRoster').get<number>('usageCheckSeconds', 60);
+  const seconds = vscode.workspace.getConfiguration('claudeSwitch').get<number>('usageCheckSeconds', 60);
   return Number.isFinite(seconds) && seconds > 0 ? Math.max(10, seconds) : 0;
 }
 
 function switchMode(): SwitchMode {
-  const mode = vscode.workspace.getConfiguration('claudeRoster').get<string>('switchMode');
+  const mode = vscode.workspace.getConfiguration('claudeSwitch').get<string>('switchMode');
   return mode === 'newConversation' || mode === 'instant' || mode === 'restartExtensions' ? mode : 'reloadWindow';
 }
 
@@ -108,7 +108,7 @@ const WRITE_BACK_WATCH_MS = 12 * 60 * 60_000;
  * inside the Claude Switch tab (see AccountsView); file and storage work
  * happens in SwitchEngine.
  */
-export class RosterController implements vscode.Disposable {
+export class SwitchController implements vscode.Disposable {
   /** The default login, in ~/.claude. */
   private live: LiveState = { kind: 'signed-out' };
   /** What this window uses: the account it chose, while that isn't the default, else `live`. */
@@ -119,7 +119,9 @@ export class RosterController implements vscode.Disposable {
   /** The account whose missing login folder was already reported. */
   private missingFolderWarned: string | undefined;
   private lastRefresh = 0;
-  private inFlight: Promise<LiveState> | undefined;
+  /** The refresh running now, and the one queued after it. See refresh(). */
+  private refreshing: Promise<LiveState> | undefined;
+  private refreshAgain: Promise<LiveState> | undefined;
   private autoRefreshTimer: ReturnType<typeof setInterval> | undefined;
   private usageTimer: ReturnType<typeof setInterval> | undefined;
   private reloadPending: { alias?: string } | undefined;
@@ -155,9 +157,9 @@ export class RosterController implements vscode.Disposable {
   constructor(
     private readonly engine: SwitchEngine,
     private readonly store: ProfileStore,
-    private readonly statusBar: RosterStatusBar,
+    private readonly statusBar: SwitchStatusBar,
     private readonly view: AccountsView,
-    private readonly log: RosterLog,
+    private readonly log: SwitchLog,
     private readonly sync: WindowSync,
     private readonly testMode: boolean,
     /** Claude Switch's own folder, where the CLI runs for usage checks. */
@@ -171,13 +173,18 @@ export class RosterController implements vscode.Disposable {
 
   /** Runs once per window, after activation. */
   async startup(): Promise<void> {
+    void removeStaleLoginDirs().then((count) => {
+      if (count) {
+        this.log.info(`Deleted ${count} sign-in folder${count === 1 ? '' : 's'} left behind by an Add Account that did not finish.`);
+      }
+    });
     const check = await this.engine.verifyLastSwitch().catch((err) => {
       this.log.warn(`Could not check the last switch: ${errorMessage(err)}`);
       return { outcome: 'none' as const };
     });
     await this.refresh();
     this.startAutoRefresh();
-    // Its own timer, so usage checks follow claudeRoster.usageCheckSeconds whatever autoRefreshSeconds is.
+    // Its own timer, so usage checks follow claudeSwitch.usageCheckSeconds whatever autoRefreshSeconds is.
     this.usageTimer = setInterval(() => this.checkUsageIfDue(), USAGE_TICK_MS);
     if (check.outcome === 'mismatch') {
       const choice = await this.view.notify(
@@ -196,19 +203,38 @@ export class RosterController implements vscode.Disposable {
     }
   }
 
-  async refresh(): Promise<LiveState> {
-    this.inFlight ??= this.engine.refresh().finally(() => {
-      this.inFlight = undefined;
+  /**
+   * Re-reads the login and updates everything shown. One runs at a time. One
+   * asked for while another runs may follow a change the running one read too
+   * early, such as a switch, so it runs once more afterwards, for every caller
+   * that asked meanwhile.
+   */
+  refresh(): Promise<LiveState> {
+    if (this.refreshing) {
+      this.refreshAgain ??= this.refreshing
+        .catch(() => undefined)
+        .then(() => {
+          this.refreshAgain = undefined;
+          return this.refresh();
+        });
+      return this.refreshAgain;
+    }
+    this.refreshing = this.runRefresh().finally(() => {
+      this.refreshing = undefined;
     });
+    return this.refreshing;
+  }
+
+  private async runRefresh(): Promise<LiveState> {
     try {
-      this.live = await this.inFlight;
+      this.live = await this.engine.refresh();
     } catch (err) {
       this.live = { kind: 'error', message: errorMessage(err) };
     }
     await this.updateWindowAccount();
     this.lastRefresh = Date.now();
     this.render();
-    void this.checkWriteBack();
+    this.checkWriteBack().catch((err: unknown) => this.showError(err));
     return this.live;
   }
 
@@ -342,12 +368,12 @@ export class RosterController implements vscode.Disposable {
   }
 
   /**
-   * Re-reads the login and usage every claudeRoster.autoRefreshSeconds while
+   * Re-reads the login and usage every claudeSwitch.autoRefreshSeconds while
    * this window is focused. Local file reads only. Call again when the setting changes.
    */
   startAutoRefresh(): void {
     this.stopAutoRefresh();
-    const seconds = vscode.workspace.getConfiguration('claudeRoster').get<number>('autoRefreshSeconds', 1);
+    const seconds = vscode.workspace.getConfiguration('claudeSwitch').get<number>('autoRefreshSeconds', 1);
     if (!Number.isFinite(seconds) || seconds <= 0) {
       return;
     }
@@ -397,7 +423,7 @@ export class RosterController implements vscode.Disposable {
    * Claude Code saves usage to .claude.json only now and then, so the focused
    * window asks Claude for the current numbers: of the account just used, in
    * any window, shortly after Claude replies; and of this window's account
-   * every claudeRoster.usageCheckSeconds otherwise. Only the focused window
+   * every claudeSwitch.usageCheckSeconds otherwise. Only the focused window
    * checks, and the others show what it found (see renderFromStore).
    */
   checkUsageIfDue(): void {
@@ -532,6 +558,11 @@ export class RosterController implements vscode.Disposable {
       void this.view.notify('error', 'That account is no longer saved in Claude Switch.');
       return;
     }
+    if (live.kind === 'error') {
+      // Which account is the default decides which accounts get a login folder: guessing could put one login in two places.
+      this.showError(live.message);
+      return;
+    }
     if (this.windowLive.kind === 'known' && this.windowLive.profile.id === profile.id) {
       void this.view.notify('info', `This window already uses "${profile.alias}".`);
       return;
@@ -544,7 +575,7 @@ export class RosterController implements vscode.Disposable {
     if (
       (mode === 'restartExtensions' || mode === 'reloadWindow') &&
       !skipConfirm &&
-      vscode.workspace.getConfiguration('claudeRoster').get<boolean>('confirmBeforeSwitch', true)
+      vscode.workspace.getConfiguration('claudeSwitch').get<boolean>('confirmBeforeSwitch', true)
     ) {
       const choice = await this.view.confirm({
         title: `Switch this window to "${profile.alias}"?`,
@@ -611,7 +642,7 @@ export class RosterController implements vscode.Disposable {
     });
     if (choice === 'signin') {
       // Not awaited: signing in takes a while, and switching should not stay blocked meanwhile.
-      void this.addAccount(isValidEmail(profile.email) ? profile.email : undefined);
+      this.addAccount(isValidEmail(profile.email) ? profile.email : undefined).catch((err: unknown) => this.showError(err));
     }
     return choice === 'switch';
   }
@@ -654,7 +685,7 @@ export class RosterController implements vscode.Disposable {
     if (
       (mode === 'restartExtensions' || mode === 'reloadWindow') &&
       !skipConfirm &&
-      vscode.workspace.getConfiguration('claudeRoster').get<boolean>('confirmBeforeSwitch', true)
+      vscode.workspace.getConfiguration('claudeSwitch').get<boolean>('confirmBeforeSwitch', true)
     ) {
       const choice = await this.view.confirm({
         title: this.window.enabled ? `Switch every window to "${profile.alias}"?` : `Switch Claude to "${profile.alias}"?`,
@@ -669,12 +700,8 @@ export class RosterController implements vscode.Disposable {
     const target = profile;
     const title = this.window.enabled ? `Switching every window to "${target.alias}"…` : `Switching Claude to "${target.alias}"…`;
     await this.applyAndActivate(title, async () => {
-      // Its newest tokens may be in its login folder, if a window used it.
-      const folderLogin = this.window.enabled ? await this.window.folders.read(target.id) : undefined;
-      if (folderLogin) {
-        await this.engine.syncFolder(target.id, folderLogin);
-      }
-      const result = await this.engine.switchTo(target.id);
+      // Its newest tokens may be in its login folder, if a window used it; the folder goes with the switch.
+      const result = await this.engine.switchTo(target.id, { folders: this.window.enabled ? this.window.folders : undefined });
       if (this.window.enabled) {
         // Every window now uses the default account; the target's login folder goes, after its tokens are saved.
         try {
@@ -991,12 +1018,8 @@ export class RosterController implements vscode.Disposable {
       return;
     }
     await this.applyAndActivate('Restoring the Claude login backup…', async () => {
-      // If a window used the account since, its newest tokens are in its login folder.
-      const folderLogin = this.window.enabled && latest.fromProfileId ? await this.window.folders.read(latest.fromProfileId) : undefined;
-      if (folderLogin && latest.fromProfileId) {
-        await this.engine.syncFolder(latest.fromProfileId, folderLogin);
-      }
-      const { profile } = await this.engine.restoreBackup(latest.slot);
+      // If a window used the account since, its newest tokens are in its login folder, which goes with the restore.
+      const { profile } = await this.engine.restoreBackup(latest.slot, this.window.enabled ? this.window.folders : undefined);
       return { alias: profile?.alias, profileId: profile?.id };
     });
   }
@@ -1087,7 +1110,7 @@ export class RosterController implements vscode.Disposable {
     this.view.update(this.windowLive, this.reloadPending, signIn, this.switching, windowNote, this.window.enabled);
   }
 
-  /** Swaps the login, then makes Claude Code use it as claudeRoster.switchMode says. */
+  /** Swaps the login, then makes Claude Code use it as claudeSwitch.switchMode says. */
   private async applyAndActivate(
     title: string,
     apply: () => Promise<{ alias?: string; profileId?: string } | undefined>,
@@ -1173,7 +1196,7 @@ export class RosterController implements vscode.Disposable {
     const abort = new AbortController();
     this.signIn = { cli, abort, email };
     const stopWatchingUrl = cli.onUrl(() => this.render());
-    void vscode.commands.executeCommand('setContext', 'claudeRoster.signingIn', true);
+    void vscode.commands.executeCommand('setContext', 'claudeSwitch.signingIn', true);
     this.render();
     this.view.reveal();
     this.log.info(`Add Account: started a background sign-in with the Claude CLI from ${claude.source}.`);
@@ -1212,7 +1235,7 @@ export class RosterController implements vscode.Disposable {
       stopWatchingUrl();
       cli.cancel();
       this.signIn = undefined;
-      void vscode.commands.executeCommand('setContext', 'claudeRoster.signingIn', false);
+      void vscode.commands.executeCommand('setContext', 'claudeSwitch.signingIn', false);
       this.render();
       await this.cleanUpLoginDir(dir);
     }
@@ -1227,7 +1250,7 @@ export class RosterController implements vscode.Disposable {
         ])
         .then((choice) => {
           if (choice === 'terminal') {
-            void this.addAccountInTerminal(claude.command);
+            this.addAccountInTerminal(claude.command).catch((err: unknown) => this.showError(err));
           } else if (choice === 'log') {
             this.showLog();
           }
@@ -1327,7 +1350,8 @@ export class RosterController implements vscode.Disposable {
       await this.refresh();
       void this.view
         .notify('success', `Added "${profile.alias}" (${email}).`, [{ id: 'switch', label: 'Switch now', style: 'primary' }])
-        .then((choice) => (choice === 'switch' ? this.switchAccount({ profileId: profile.id }) : undefined));
+        .then((choice) => (choice === 'switch' ? this.switchAccount({ profileId: profile.id }) : undefined))
+        .catch((err: unknown) => this.showError(err));
       return;
     }
 
@@ -1442,15 +1466,15 @@ function profileLive(profile: ProfileMeta): LiveState {
 }
 
 /**
- * The Claude CLI used to sign in: the claudeRoster.claudePath setting, else the
+ * The Claude CLI used to sign in: the claudeSwitch.claudePath setting, else the
  * CLI bundled with the Claude Code extension (the same version that will use
  * the login), else `claude` on PATH.
  */
 function resolveClaude(): { command: string; source: string } {
   // Machine-scoped, so a workspace's settings can never choose what runs here.
-  const configured = vscode.workspace.getConfiguration('claudeRoster').get<string>('claudePath')?.trim();
+  const configured = vscode.workspace.getConfiguration('claudeSwitch').get<string>('claudePath')?.trim();
   if (configured) {
-    return { command: configured, source: 'the claudeRoster.claudePath setting' };
+    return { command: configured, source: 'the claudeSwitch.claudePath setting' };
   }
   const claudeExtension = vscode.extensions.getExtension('anthropic.claude-code');
   if (claudeExtension) {

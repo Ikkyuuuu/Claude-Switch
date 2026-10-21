@@ -137,7 +137,7 @@ export const ACTIVITY_MIN_GAP_MS = 5_000;
 export interface UsageSchedule {
   now: number;
   lastCheck: number;
-  /** The check while Claude is idle, from claudeRoster.usageCheckSeconds. */
+  /** The check while Claude is idle, from claudeSwitch.usageCheckSeconds. */
   intervalMs: number;
   /** When Claude was first used since the last check; 0 if it wasn't. */
   activitySince: number;

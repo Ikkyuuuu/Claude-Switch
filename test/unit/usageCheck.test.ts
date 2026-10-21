@@ -49,7 +49,7 @@ suite('askClaudeForUsage', () => {
 
 suite('forgetSavedUsage', () => {
   test("clears only the saved usage in a usage check's own settings folder", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roster-usage-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-usage-'));
     try {
       const file = path.join(dir, '.claude.json');
       // Nothing saved yet: nothing to do.

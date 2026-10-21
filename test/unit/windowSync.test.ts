@@ -6,7 +6,7 @@ import { SwitchSignal, WindowSync } from '../../src/windowSync';
 
 suite('WindowSync', () => {
   test('tells other windows about a switch, but not the window that made it', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roster-sync-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-sync-'));
     const seenByA: SwitchSignal[] = [];
     const a = new WindowSync(dir, 'window-a', (s) => seenByA.push(s), 20);
     let resolveB: (signal: SwitchSignal) => void = () => {};
@@ -32,7 +32,7 @@ suite('WindowSync', () => {
   });
 
   test('ignores signals from before the window started', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roster-sync-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-sync-'));
     const old = new WindowSync(dir, 'old-window', () => {}, 20);
     await old.publish('Work');
     const seen: SwitchSignal[] = [];

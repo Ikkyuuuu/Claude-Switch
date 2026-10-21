@@ -52,13 +52,11 @@ export interface LastSwitch {
   at: number;
 }
 
-const PROFILES_KEY = 'roster.profiles';
-const BACKUPS_KEY = 'roster.backups';
-/** Written by versions before 0.9; only cleared now. */
-const DISMISSED_KEY = 'roster.dismissedIdentities';
-const LAST_SWITCH_KEY = 'roster.lastSwitch';
+const PROFILES_KEY = 'claudeSwitch.profiles';
+const BACKUPS_KEY = 'claudeSwitch.backups';
+const LAST_SWITCH_KEY = 'claudeSwitch.lastSwitch';
 /** The account each window (workspace) chose, by window key. */
-const WINDOWS_KEY = 'roster.windowAccounts';
+const WINDOWS_KEY = 'claudeSwitch.windowAccounts';
 /** A window's choice not used for this long is forgotten, and its login folder goes away. */
 const WINDOW_CHOICE_TTL_MS = 30 * 24 * 60 * 60_000;
 export const MAX_BACKUPS = 3;
@@ -277,7 +275,7 @@ export class ProfileStore {
     for (let slot = 0; slot < MAX_BACKUPS; slot++) {
       await this.secrets.delete(backupKey(slot));
     }
-    for (const key of [PROFILES_KEY, BACKUPS_KEY, DISMISSED_KEY, LAST_SWITCH_KEY, WINDOWS_KEY]) {
+    for (const key of [PROFILES_KEY, BACKUPS_KEY, LAST_SWITCH_KEY, WINDOWS_KEY]) {
       await this.mutate(key, () => undefined);
     }
   }

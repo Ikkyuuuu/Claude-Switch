@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { planOf, readUsageCache, usageFromUtilization } from './accountDetails';
@@ -167,13 +167,18 @@ export class SwitchEngine {
   /**
    * replaceLive applies the saved login even when the live login is the same
    * account, which is how a fresh sign-in replaces an expired active login.
+   * With folders, the account's login folder, if a window used it, gives its
+   * newest tokens first and goes once the login is in ~/.claude, all under
+   * one lock: a Claude that refreshed the login in between would leave
+   * ~/.claude with a refresh token that no longer works.
    */
-  async switchTo(profileId: string, options: { replaceLive?: boolean } = {}): Promise<SwitchResult> {
+  async switchTo(profileId: string, options: { replaceLive?: boolean; folders?: LoginFolders } = {}): Promise<SwitchResult> {
     return this.withLock(async () => {
       const profile = this.store.get(profileId);
       if (!profile) {
         throw new Error('That account is no longer saved in Claude Switch.');
       }
+      await this.syncFromFolder(profileId, options.folders);
       const target = await this.store.getLogin(profileId);
       if (!target) {
         throw new Error(`The saved login for "${profile.alias}" is missing. Add the account again.`);
@@ -203,6 +208,7 @@ export class SwitchEngine {
       });
 
       await this.applyVerified({ credentialsRaw: target.credentialsRaw, account: target.account }, before);
+      await this.dropFolder(profileId, options.folders);
       await this.store.markUsed(profileId);
       await this.store.setLastSwitch({ profileId, at: this.now() });
       this.log.info(`Switched to "${profile.alias}".`);
@@ -210,8 +216,11 @@ export class SwitchEngine {
     });
   }
 
-  /** Puts the login from a backup back in place (the most recent one by default). */
-  async restoreBackup(slot?: number): Promise<{ profile?: ProfileMeta }> {
+  /**
+   * Puts the login from a backup back in place (the most recent one by
+   * default). folders: as for switchTo, for the restored account.
+   */
+  async restoreBackup(slot?: number, folders?: LoginFolders): Promise<{ profile?: ProfileMeta }> {
     return this.withLock(async () => {
       const backups = this.store.listBackups();
       const meta = slot === undefined ? backups[0] : backups.find((b) => b.slot === slot);
@@ -235,10 +244,17 @@ export class SwitchEngine {
       // The account may have been used since, in a window's login folder or here, and its
       // refresh token replaced: then the backup's tokens no longer work, and the saved ones do.
       const profile = snapshot.account ? this.store.findByAccount(snapshot.account) : undefined;
+      await this.syncFromFolder(profile?.id, folders);
       const saved = profile ? await this.store.getLogin(profile.id) : undefined;
       const restore = saved && snapshot.credentialsRaw && newerLogin(saved.credentialsRaw, snapshot.credentialsRaw) ? { ...snapshot, credentialsRaw: saved.credentialsRaw } : snapshot;
+      // A login that isn't a saved account is kept nowhere else; back it up, as a switch does.
+      if (live.kind !== 'known' && (before.credentialsRaw !== null || before.account !== null)) {
+        await this.step('backup');
+        await this.store.pushBackup(before, { toProfileId: profile?.id });
+      }
       await this.applyVerified(restore, before);
       if (profile) {
+        await this.dropFolder(profile.id, folders);
         await this.store.markUsed(profile.id);
         await this.store.setLastSwitch({ profileId: profile.id, at: this.now() });
       }
@@ -337,38 +353,45 @@ export class SwitchEngine {
    * creates the login folders that windows need, and, after saving their newest
    * tokens, removes the default account's folder, whose login lives in
    * ~/.claude, and folders no window has used for FOLDER_IDLE_MS. Background
-   * callers skip their turn while another window holds the lock.
+   * callers skip their turn while another window holds the lock. defaultId is
+   * the caller's idea of the default account; under the lock, the login in
+   * ~/.claude decides, since it may have changed since the caller looked.
    */
   async reconcileFolders(folders: LoginFolders, defaultId: string | undefined, chosen: Set<string>, background = true): Promise<void> {
-    const plan = async () => {
+    const plan = async (defaultAccount: string | undefined) => {
       const create: { id: string; login: SavedLogin }[] = [];
       for (const id of chosen) {
-        const login = id !== defaultId && !folders.has(id) ? await this.store.getLogin(id) : undefined;
+        const login = id !== defaultAccount && !folders.has(id) ? await this.store.getLogin(id) : undefined;
         if (login) {
           create.push({ id, login });
         }
       }
       const remove: string[] = [];
       for (const id of await folders.list()) {
-        if (id !== defaultId && chosen.has(id) && this.store.get(id)) {
+        if (id !== defaultAccount && chosen.has(id) && this.store.get(id)) {
           continue;
         }
         // A folder that no window uses stays while Claude conversations opened on it may still refresh their login into it.
         const idle = this.now() - ((await folders.modifiedAt(id)) ?? 0) >= FOLDER_IDLE_MS;
-        if (id === defaultId || !this.store.get(id) || idle) {
+        if (id === defaultAccount || !this.store.get(id) || idle) {
           remove.push(id);
         }
       }
       return { create, remove };
     };
     // Usually all is in order; then skip the lock, since this runs on every refresh.
-    const first = await plan();
+    const first = await plan(defaultId);
     if (first.create.length === 0 && first.remove.length === 0) {
       return;
     }
     await this.withLock(
       async () => {
-        const { create, remove } = await plan();
+        // A folder made for the account that is now the default would put its login in two places.
+        const live = this.classify(await this.readStable());
+        if (live.kind === 'error') {
+          throw new Error(live.message);
+        }
+        const { create, remove } = await plan(live.kind === 'known' ? live.profile.id : undefined);
         for (const { id, login } of create) {
           await folders.write(id, login.credentialsRaw);
           this.log.info(`Created the login folder for "${this.store.get(id)?.alias ?? id}".`);
@@ -416,6 +439,32 @@ export class SwitchEngine {
     }
     await this.store.updateLogin(profileId, { credentialsRaw, account: saved.account });
     this.log.info(`Saved the refreshed login for "${profile.alias}".`);
+  }
+
+  /** Saves the tokens in an account's login folder, if it has one. */
+  private async syncFromFolder(profileId: string | undefined, folders: LoginFolders | undefined): Promise<void> {
+    const raw = profileId && folders ? await folders.read(profileId) : undefined;
+    if (profileId && raw) {
+      await this.syncFolder(profileId, raw);
+    }
+  }
+
+  /**
+   * Removes the login folder of an account whose login is now in ~/.claude,
+   * after saving its newest tokens. The switch itself is done by then, so a
+   * failure is only logged; reconcileFolders tries again.
+   */
+  private async dropFolder(profileId: string, folders: LoginFolders | undefined): Promise<void> {
+    if (!folders?.has(profileId)) {
+      return;
+    }
+    try {
+      await this.syncFromFolder(profileId, folders);
+      await folders.remove(profileId);
+      this.log.info(`Removed the login folder for "${this.store.get(profileId)?.alias ?? profileId}".`);
+    } catch (err) {
+      this.log.warn(`Could not remove the login folder yet: ${errorMessage(err)}`);
+    }
   }
 
   /** Whether the live login is still `target`'s; repairs it when only oauthAccount changed. Call under the lock. */
@@ -644,10 +693,21 @@ async function tryLock(file: string, staleMs: number): Promise<() => Promise<voi
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const handle = await fs.open(file, 'wx');
-      await handle.writeFile(`${process.pid} ${new Date().toISOString()}`);
+      // The pid tells other windows whether the holder still runs; the random part tells this lock from a later one.
+      const owner = `${process.pid} ${new Date().toISOString()} ${randomBytes(8).toString('hex')}`;
+      try {
+        await handle.writeFile(owner);
+      } catch (writeErr) {
+        await handle.close();
+        await fs.rm(file, { force: true });
+        throw writeErr;
+      }
       await handle.close();
       return async () => {
-        await fs.rm(file, { force: true });
+        // A lock held past LOCK_STALE_MS may have been taken over; that one is another window's to release.
+        if ((await readTextIfExists(file).catch(() => undefined)) === owner) {
+          await fs.rm(file, { force: true });
+        }
       };
     } catch (err) {
       if (errorCode(err) !== 'EEXIST') {

@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { ProfileStore } from './profileStore';
-import { RosterLog } from './rosterLog';
+import { SwitchLog } from './switchLog';
 import { LiveState } from './switchEngine';
 import { buildViewState, parseMessage, SignInState, unsupportedState } from './viewModel';
-import type { HostMessage, Notice, PromptAction, PromptSpec, RosterViewState, WebviewMessage } from './webview/protocol';
+import type { HostMessage, Notice, PromptAction, PromptSpec, SwitchViewState, WebviewMessage } from './webview/protocol';
 import { isAvatarColour } from './webview/avatar';
 import { checkInput } from './webview/rules';
 
@@ -34,19 +34,20 @@ const MAX_NOTICES = 4;
 
 /**
  * The Accounts view in the Claude Switch activity bar tab: a webview drawn by
- * src/webview/main.ts and styled by media/roster.css.
+ * src/webview/main.ts and styled by media/switch.css.
  */
 export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposable {
-  static readonly id = 'claudeRoster.accounts';
+  static readonly id = 'claudeSwitch.accounts';
 
   private view: vscode.WebviewView | undefined;
-  private current: RosterViewState;
+  private current: SwitchViewState;
   /** False until the controller's first update: before it, the tab shows its loading screen. */
   private loaded: boolean;
   private badge: vscode.ViewBadge | undefined;
   private description: string | undefined;
   private readonly shown = new vscode.EventEmitter<void>();
-  private readonly subscriptions: vscode.Disposable[] = [];
+  /** Listeners on the current webview view. */
+  private viewListeners: vscode.Disposable[] = [];
   /** The webview's script has loaded and can receive messages. */
   private ready = false;
   private lastPosted = '';
@@ -68,7 +69,7 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
   /** store is undefined on platforms Claude Switch does not support. */
   constructor(
     private readonly store: ProfileStore | undefined,
-    private readonly log: RosterLog,
+    private readonly log: SwitchLog,
     private readonly extensionUri: vscode.Uri,
     private readonly onMessage: (message: WebviewMessage) => void,
   ) {
@@ -93,7 +94,7 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
   }
 
   /** What the webview currently shows. */
-  get state(): RosterViewState {
+  get state(): SwitchViewState {
     return this.current;
   }
 
@@ -273,7 +274,9 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
     view.webview.html = this.html(view.webview);
     view.badge = this.badge;
     view.description = this.description;
-    this.subscriptions.push(
+    // A view that is hidden and shown again comes back as a new one: listen to this one only.
+    this.disposeViewListeners();
+    this.viewListeners = [
       view.webview.onDidReceiveMessage((raw) => this.receive(raw)),
       view.onDidChangeVisibility(() => {
         if (view.visible) {
@@ -282,10 +285,19 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
         }
       }),
       view.onDidDispose(() => {
-        this.view = undefined;
-        this.ready = false;
+        if (this.view === view) {
+          this.view = undefined;
+          this.ready = false;
+          this.disposeViewListeners();
+        }
       }),
-    );
+    ];
+  }
+
+  private disposeViewListeners(): void {
+    for (const listener of this.viewListeners.splice(0)) {
+      listener.dispose();
+    }
   }
 
   /** Handles a message from the webview. Anything unexpected is ignored. */
@@ -379,9 +391,7 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
       clearTimeout(this.logTimer);
     }
     this.shown.dispose();
-    for (const subscription of this.subscriptions) {
-      subscription.dispose();
-    }
+    this.disposeViewListeners();
   }
 
   /** Sends the state, unless the webview already shows exactly this (auto-refresh repeats often). */
@@ -435,7 +445,7 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="${asset('media', 'roster.css')}">
+  <link rel="stylesheet" href="${asset('media', 'switch.css')}">
   <title>Claude Switch</title>
 </head>
 <body>

@@ -5,17 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // The oldest VS Code this extension supports; keep in step with engines.vscode.
-const version = process.env.ROSTER_TEST_VSCODE ?? '1.100.0';
+const version = process.env.CLAUDE_SWITCH_TEST_VSCODE ?? '1.100.0';
 
 // Everything large or stateful lives in the temp folder, outside the (possibly
 // OneDrive-synced) project folder.
-const cache = join(tmpdir(), 'claude-roster-vscode-test');
+const cache = join(tmpdir(), 'claude-switch-vscode-test');
 mkdirSync(cache, { recursive: true });
 const executable = await downloadAndUnzipVSCode({ version, cachePath: cache });
 
 // Fresh, fake Claude config and VS Code profile for every run: tests never see a real login.
 // Earlier runs' folders hold only fake data, so clear them first.
-const RUN_PREFIX = 'claude-roster-it-';
+const RUN_PREFIX = 'claude-switch-it-';
 for (const name of readdirSync(tmpdir())) {
   if (name.startsWith(RUN_PREFIX)) {
     rmSync(join(tmpdir(), name), { recursive: true, force: true, maxRetries: 3 });

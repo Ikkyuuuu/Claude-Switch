@@ -3,6 +3,7 @@ import { existsSync, promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { delay, errorCode, readSnapshot, resolvePaths, sameSnapshot, SavedLogin, toSavedLogin } from './claudeFiles';
+import { LEGACY_LOGIN_DIR_PREFIX } from './legacyNames';
 import { errorMessage, redact } from './log';
 import { LOGIN_DIR_VARIABLE } from './windowAccounts';
 import { isValidEmail } from './webview/rules';
@@ -13,7 +14,12 @@ import { isValidEmail } from './webview/rules';
  * module owns that folder and the CLI process; the prompts live in commands.ts.
  */
 
-const LOGIN_DIR_PREFIX = 'claude-roster-login-';
+const LOGIN_DIR_PREFIX = 'claude-switch-login-';
+
+/** A sign-in folder's name, from this version or one before 0.14. */
+function isLoginDirName(name: string): boolean {
+  return name.startsWith(LOGIN_DIR_PREFIX) || name.startsWith(LEGACY_LOGIN_DIR_PREFIX);
+}
 
 export async function createLoginDir(root: string = os.tmpdir()): Promise<string> {
   return fs.mkdtemp(path.join(root, LOGIN_DIR_PREFIX));
@@ -25,7 +31,7 @@ export async function createLoginDir(root: string = os.tmpdir()): Promise<string
  */
 export async function removeLoginDir(dir: string, root: string = os.tmpdir()): Promise<void> {
   const resolved = path.resolve(dir);
-  if (path.dirname(resolved) !== path.resolve(root) || !path.basename(resolved).startsWith(LOGIN_DIR_PREFIX)) {
+  if (path.dirname(resolved) !== path.resolve(root) || !isLoginDirName(path.basename(resolved))) {
     throw new Error(`Refusing to delete ${resolved}: it is not a Claude Switch sign-in folder.`);
   }
   const stat = await fs.lstat(resolved).catch(() => undefined);
@@ -36,6 +42,30 @@ export async function removeLoginDir(dir: string, root: string = os.tmpdir()): P
     throw new Error(`Refusing to delete ${resolved}: it is not a plain folder.`);
   }
   await fs.rm(resolved, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+}
+
+/** Longer than any sign-in can run (see waitForLogin), so an older sign-in folder is no window's any more. */
+const STALE_LOGIN_DIR_MS = 30 * 60_000;
+
+/**
+ * Deletes sign-in folders left behind when a window closed or reloaded
+ * during Add Account; they can hold live tokens. Newer ones may belong to a
+ * sign-in still running in another window. Returns how many went.
+ */
+export async function removeStaleLoginDirs(root: string = os.tmpdir(), now = Date.now()): Promise<number> {
+  const names = await fs.readdir(root).catch(() => [] as string[]);
+  let removed = 0;
+  for (const name of names.filter(isLoginDirName)) {
+    const dir = path.join(root, name);
+    const stat = await fs.lstat(dir).catch(() => undefined);
+    if (stat?.isDirectory() && now - stat.mtimeMs >= STALE_LOGIN_DIR_MS) {
+      await removeLoginDir(dir, root).then(
+        () => removed++,
+        () => undefined,
+      );
+    }
+  }
+  return removed;
 }
 
 export interface WaitForLoginOptions {

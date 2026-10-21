@@ -71,7 +71,7 @@ suite('Window accounts', () => {
 
 suite('Which account a conversation used', () => {
   test("names a project's conversation folder as Claude Code does", () => {
-    assert.equal(projectFolderName('c:\\Users\\watta\\OneDrive\\เอกสาร\\Project\\Claude Roster'), 'c--Users-watta-OneDrive--------Project-Claude-Roster');
+    assert.equal(projectFolderName('c:\\Users\\watta\\OneDrive\\เอกสาร\\Project\\Claude Switch'), 'c--Users-watta-OneDrive--------Project-Claude-Switch');
     assert.equal(projectFolderName('C:\\work\\my-app'), 'C--work-my-app');
     assert.equal(projectFolderName('/home/dev/side_project'), '-home-dev-side-project');
   });

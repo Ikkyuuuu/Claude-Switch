@@ -197,15 +197,17 @@ export interface AtomicWriteOptions {
 /**
  * Writes to a temp file in the same folder, then renames it over the target.
  * Retries the rename because Windows reports EPERM/EBUSY while another process
- * (such as the Claude extension) briefly has the file open.
+ * (such as the Claude extension) briefly has the file open. The temp file
+ * goes again on any failure.
  */
 export async function atomicWrite(file: string, content: string, options: AtomicWriteOptions = {}): Promise<void> {
   const target = await realTarget(file);
   const mode = await existingMode(target);
-  const tmp = `${target}.roster-${randomBytes(6).toString('hex')}.tmp`;
+  const tmp = `${target}.claude-switch-${randomBytes(6).toString('hex')}.tmp`;
   const rename = options.rename ?? ((from: string, to: string) => fs.rename(from, to));
-  await fs.writeFile(tmp, content, { encoding: 'utf8', mode, flag: 'wx' });
   try {
+    // Inside the try: a write that fails half way, say on a full disk, must not leave the temp file behind.
+    await fs.writeFile(tmp, content, { encoding: 'utf8', mode, flag: 'wx' });
     for (let attempt = 1; ; attempt++) {
       try {
         await rename(tmp, target);
