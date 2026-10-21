@@ -42,7 +42,7 @@ There are three ways in:
 - **Claude Switch tab** in the activity bar (two people with swap arrows):
   - With no saved accounts, it shows a welcome page with an **Add account** button.
   - Otherwise, the account this window uses sits on top under **This window**, and your other accounts are listed below it.
-  - Click an account to use it in this window; other windows keep theirs. Hover over it for edit and remove buttons, or right-click it for the same actions and **Switch All Windows**.
+  - Click anywhere on an account, its **Switch** label included, to use it in this window; other windows keep theirs. Hover over it for edit and remove buttons, or right-click it for the same actions and **Switch All Windows**.
   - **Edit** (the pencil) changes the account's name and its avatar colour, with a live preview:
 
     <p align="center">
@@ -134,6 +134,8 @@ An **Active** label marks the account this window uses. **Expired** means the sa
   </p>
 
 To make every window use one account, use **Switch All Windows** (right-click an account, or the **⋯** menu). It changes the default login in `~/.claude`, and every window goes back to the default account. Other open windows offer to reload; until they do, Claude conversations running there keep the old account and can write the old login back. **Exit `claude` sessions running in terminals first,** for the same reason.
+
+When Claude Switch asks before switching (see `claudeSwitch.confirmBeforeSwitch`), the question appears as soon as you click. Meanwhile it checks Claude's login files in the background, and nothing changes unless that check passes.
 
 Clicking accounts while a switch is under way does nothing; the tab greys out the list until the switch finishes.
 
@@ -241,7 +243,10 @@ npm run compile            # type-check, lint, bundle into dist/
 npm run test:unit          # engine tests against a fake home folder
 npm run test:integration   # runs inside VS Code 1.100.0 (downloaded to %TEMP%)
 npm run vsix               # builds claude-switch-accounts-<version>.vsix
+code --install-extension claude-switch-accounts-<version>.vsix --force
 ```
+
+To try a build in your own VS Code, run `npm run vsix` first, every time: installing a `.vsix` left from an earlier build installs the old code. `--force` reinstalls even when the version number hasn't changed. Then run **Developer: Reload Window** in each open window.
 
 - Press **F5** and choose **Run Extension (sandbox Claude folder)** to try the UI with `CLAUDE_CONFIG_DIR` pointing at a temp folder, and a VS Code profile folder of its own (`--user-data-dir`). Neither your real login nor the accounts you saved in Claude Switch are touched.
 - **Run Extension (real Claude login)** uses your real files and your saved accounts. Back them up first (see below).

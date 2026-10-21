@@ -532,6 +532,8 @@ export class SwitchController implements vscode.Disposable {
       return;
     }
     this.switching = true;
+    // The list dims at once, so the click visibly landed even before anything slow.
+    this.render();
     try {
       if (args.allWindows || !this.window.enabled) {
         await this.switchToProfile(args.profileId, args.skipConfirm);
@@ -558,22 +560,19 @@ export class SwitchController implements vscode.Disposable {
    * the previous login, in its own place, so nothing is written back.
    */
   private async switchWindow(profileId: string, skipConfirmInTests?: boolean): Promise<void> {
-    const live = await this.refresh();
-    const profile = this.store.get(profileId);
-    if (!profile) {
-      void this.view.notify('error', 'That account is no longer saved in Claude Switch.');
+    // Re-reading the login takes up to a second, so it runs in the background while the user answers, and the
+    // question appears at once, going by what the tab shows. Only a refusal waits for the read, so it never comes
+    // from what the tab showed; a yes is checked against it before anything changes.
+    const checked = this.refresh();
+    let asked = this.windowSwitchTarget(profileId, false);
+    if (!asked) {
+      await checked;
+      asked = this.windowSwitchTarget(profileId, true);
+    }
+    if (!asked) {
       return;
     }
-    if (live.kind === 'error') {
-      // Which account is the default decides which accounts get a login folder: guessing could put one login in two places.
-      this.showError(live.message);
-      return;
-    }
-    if (this.windowLive.kind === 'known' && this.windowLive.profile.id === profile.id) {
-      void this.view.notify('info', `This window already uses "${profile.alias}".`);
-      return;
-    }
-    if (profile.status === 'needs-relogin' && !(await this.switchExpiredAnyway(profile))) {
+    if (asked.status === 'needs-relogin' && !(await this.switchExpiredAnyway(asked))) {
       return;
     }
     const mode = switchMode();
@@ -584,7 +583,7 @@ export class SwitchController implements vscode.Disposable {
       vscode.workspace.getConfiguration('claudeSwitch').get<boolean>('confirmBeforeSwitch', true)
     ) {
       const choice = await this.view.confirm({
-        title: `Switch this window to "${profile.alias}"?`,
+        title: `Switch this window to "${asked.alias}"?`,
         message: WINDOW_RESTART_DETAIL[mode],
         actions: [{ id: 'switch', label: mode === 'reloadWindow' ? 'Switch and reload' : 'Switch and restart', style: 'primary' }],
       });
@@ -593,7 +592,14 @@ export class SwitchController implements vscode.Disposable {
       }
     }
 
-    const defaultId = live.kind === 'known' ? live.profile.id : undefined;
+    // Again, against the files: by now the read that started with the click has usually finished, or auto-refresh
+    // has read them since. Under the switch lock, reconcileFolders reads the default login once more anyway.
+    await checked;
+    const profile = this.windowSwitchTarget(profileId, true);
+    if (!profile) {
+      return;
+    }
+    const defaultId = this.live.kind === 'known' ? this.live.profile.id : undefined;
     try {
       await this.view.busy(`Switching this window to "${profile.alias}"…`, async () => {
         await this.store.setWindowChoice(this.window.key, profile.id, this.window.projects);
@@ -634,6 +640,34 @@ export class SwitchController implements vscode.Disposable {
           void this.openConversation();
         }
       });
+  }
+
+  /**
+   * The account to switch this window to, going by the last refresh; undefined when this window can't switch to
+   * it, and then, with report, the user is told why.
+   */
+  private windowSwitchTarget(profileId: string, report: boolean): ProfileMeta | undefined {
+    const profile = this.store.get(profileId);
+    if (!profile) {
+      if (report) {
+        void this.view.notify('error', 'That account is no longer saved in Claude Switch.');
+      }
+      return undefined;
+    }
+    if (this.live.kind === 'error') {
+      // Which account is the default decides which accounts get a login folder: guessing could put one login in two places.
+      if (report) {
+        this.showError(this.live.message);
+      }
+      return undefined;
+    }
+    if (this.windowLive.kind === 'known' && this.windowLive.profile.id === profile.id) {
+      if (report) {
+        void this.view.notify('info', `This window already uses "${profile.alias}".`);
+      }
+      return undefined;
+    }
+    return profile;
   }
 
   /** For an account whose saved login expired: offers to sign in again. True means switch anyway. */
