@@ -107,6 +107,22 @@ export function hasClaudeLogin(credentialsRaw: string): boolean {
   return isPlainObject(oauth) && typeof oauth.accessToken === 'string' && oauth.accessToken.length > 0;
 }
 
+/**
+ * Tells one login's tokens from another's without keeping them: a hash of the
+ * refresh token, which changes whenever Claude refreshes the login. undefined
+ * for a file without tokens.
+ */
+export function tokenKey(credentialsRaw: string): string | undefined {
+  let oauth: unknown;
+  try {
+    oauth = parseCredentials(credentialsRaw).claudeAiOauth;
+  } catch {
+    return undefined;
+  }
+  const token = isPlainObject(oauth) ? (oauth.refreshToken ?? oauth.accessToken) : undefined;
+  return typeof token === 'string' && token ? createHash('sha256').update(token).digest('hex').slice(0, 32) : undefined;
+}
+
 /** When the refresh token stops working, in epoch milliseconds, if Claude recorded it. */
 export function refreshTokenExpiry(credentialsRaw: string): number | undefined {
   return oauthTime(credentialsRaw, 'refreshTokenExpiresAt');

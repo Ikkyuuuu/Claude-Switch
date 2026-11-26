@@ -3,7 +3,8 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { usageFromUtilization } from '../../src/accountDetails';
-import { askClaudeForUsage, forgetSavedUsage, UsageCheckOptions } from '../../src/usageCheck';
+import { askClaudeForUsage, checkedAccount, clearInterruptedSaves, forgetSavedUsage, UsageCheckOptions } from '../../src/usageCheck';
+import { fakeAccount } from '../fixtures';
 
 const FAKE_CLAUDE = path.join(__dirname, '..', 'fakeClaude.js');
 const RATE_LIMITS = {
@@ -32,8 +33,17 @@ suite('askClaudeForUsage', () => {
     assert.equal(usage?.weeklyOpus, undefined);
   });
 
-  test('fails when Claude cannot get the usage', async () => {
-    await assert.rejects(askClaudeForUsage(options('usage-error')), /did not return the usage/);
+  test("fails with Claude's own reason when it cannot get the usage, and lets it save its settings first", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-usage-'));
+    try {
+      const saved = path.join(dir, 'saved');
+      const ask = askClaudeForUsage(options('usage-error', { env: { ...options('usage-error').env, FAKE_SAVED: saved } }));
+      await assert.rejects(ask, { message: 'Claude did not return the usage: get_usage failed: Rate limited.' });
+      // Stopped before then, it would have left its temporary files behind.
+      assert.equal(await fs.readFile(saved, 'utf8'), 'saved', 'Claude finished and exited by itself');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   test('gives up and stops Claude when it does not answer', async () => {
@@ -44,6 +54,44 @@ suite('askClaudeForUsage', () => {
 
   test('reports a missing CLI', async () => {
     await assert.rejects(askClaudeForUsage({ command: path.join(os.tmpdir(), 'no-such-claude.exe'), cwd: os.tmpdir() }), /Could not find the Claude Code CLI/);
+  });
+});
+
+suite('clearInterruptedSaves', () => {
+  test('deletes the temporary files and settings lock an interrupted Claude left, and nothing else', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-usage-'));
+    try {
+      const keep = ['.claude.json', 'policy-limits.json', 'backups'];
+      const leftovers = ['.claude.json.tmp.10124.16310f30a238', 'policy-limits.json.stamp.json.tmp.83c289be', '.claude.json.lock'];
+      for (const name of [...keep, ...leftovers]) {
+        await (name === 'backups' || name.endsWith('.lock') ? fs.mkdir(path.join(dir, name)) : fs.writeFile(path.join(dir, name), '{}'));
+      }
+      assert.equal(await clearInterruptedSaves(dir), leftovers.length);
+      assert.deepEqual((await fs.readdir(dir)).sort(), [...keep].sort());
+      assert.equal(await clearInterruptedSaves(dir), 0);
+      assert.equal(await clearInterruptedSaves(path.join(dir, 'missing')), 0);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+suite('checkedAccount', () => {
+  test('tells whose login Claude found, looked up afresh at each check', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-switch-usage-'));
+    try {
+      const file = path.join(dir, '.claude.json');
+      await fs.writeFile(file, JSON.stringify({ numStartups: 3, oauthAccount: fakeAccount('Earlier') }));
+      await forgetSavedUsage(dir);
+      assert.equal(await checkedAccount(dir), undefined, "the last check's answer is gone before the next");
+      // Claude looks its account up as it starts, and saves it.
+      await fs.writeFile(file, JSON.stringify({ numStartups: 4, oauthAccount: fakeAccount('Now') }));
+      assert.equal((await checkedAccount(dir))?.emailAddress, 'now@example.test');
+      await fs.writeFile(file, JSON.stringify({ oauthAccount: { emailAddress: 1 } }));
+      assert.equal(await checkedAccount(dir), undefined, 'not an account');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

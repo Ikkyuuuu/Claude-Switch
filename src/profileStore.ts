@@ -36,6 +36,19 @@ export interface ProfileMeta {
   renewal?: RenewalSetting;
   /** The avatar colour the user chose (0 to AVATAR_COLOURS - 1); unset means the default. */
   color?: number;
+  /**
+   * Set when Claude found this account's login to be another account's, such as
+   * one signed in to from a window that uses this account: that account's email.
+   */
+  signedInAs?: string;
+}
+
+/** Whose a login's tokens turned out to be, when Claude's CLI was asked. By tokenKey(). */
+export interface TokenOwner {
+  /** identityOf() the account. */
+  identity: string;
+  email: string;
+  at: number;
 }
 
 export interface BackupMeta {
@@ -57,6 +70,9 @@ const BACKUPS_KEY = 'claudeSwitch.backups';
 const LAST_SWITCH_KEY = 'claudeSwitch.lastSwitch';
 /** The account each window (workspace) chose, by window key. */
 const WINDOWS_KEY = 'claudeSwitch.windowAccounts';
+/** Whose tokens are whose, as Claude's CLI said; shared by every window. See TokenOwner. */
+const TOKEN_OWNERS_KEY = 'claudeSwitch.tokenOwners';
+const MAX_TOKEN_OWNERS = 50;
 /** A window's choice not used for this long is forgotten, and its login folder goes away. */
 const WINDOW_CHOICE_TTL_MS = 30 * 24 * 60 * 60_000;
 export const MAX_BACKUPS = 3;
@@ -143,7 +159,52 @@ export class ProfileStore {
       throw new Error(`That login belongs to a different account than "${meta.alias}".`);
     }
     await this.writeLogin(id, login);
-    await this.patch(id, { email: login.account.emailAddress });
+    // A login of its own again, whatever another account's had been there.
+    await this.patch(id, { email: login.account.emailAddress, signedInAs: undefined });
+  }
+
+  /**
+   * Makes an account the one a login belongs to, such as the account a sign-in
+   * picked in the browser instead: that account's login, email and identity,
+   * under the same name and colour. What belonged to the account it was goes
+   * with it: its plan, usage and renewal date.
+   */
+  async adopt(id: string, login: SavedLogin): Promise<void> {
+    this.require(id);
+    const identity = identityOf(login.account);
+    const other = this.list().find((p) => p.identity === identity && p.id !== id);
+    if (other) {
+      throw new Error(`${login.account.emailAddress} is already saved as "${other.alias}".`);
+    }
+    await this.writeLogin(id, login);
+    await this.patch(id, { email: login.account.emailAddress, identity, signedInAs: undefined, plan: undefined, usage: undefined, renewal: undefined });
+  }
+
+  /**
+   * Records that the account's login turned out to be another account's (see
+   * ProfileMeta.signedInAs), or with undefined, that it is its own again.
+   */
+  async setSignedInAs(id: string, email: string | undefined): Promise<void> {
+    // The usage seen was that account's, not this one's.
+    await this.patch(id, email ? { signedInAs: email, usage: undefined } : { signedInAs: undefined });
+  }
+
+  /** Whose the tokens with this tokenKey() are, if Claude's CLI was asked. */
+  tokenOwner(key: string): TokenOwner | undefined {
+    return this.read<Record<string, TokenOwner>>(TOKEN_OWNERS_KEY)?.[key];
+  }
+
+  /** Remembers whose tokens these are, keeping the most recent MAX_TOKEN_OWNERS. */
+  async rememberTokenOwner(keys: string[], identity: string, email: string): Promise<void> {
+    const at = Date.now();
+    await this.mutate<Record<string, TokenOwner>>(TOKEN_OWNERS_KEY, (owners = {}) => {
+      const next = { ...owners, ...Object.fromEntries(keys.map((key) => [key, { identity, email, at }])) };
+      return Object.fromEntries(
+        Object.entries(next)
+          .sort(([, a], [, b]) => b.at - a.at)
+          .slice(0, MAX_TOKEN_OWNERS),
+      );
+    });
   }
 
   /** Changes the name and avatar colour shown for an account. */
@@ -275,7 +336,7 @@ export class ProfileStore {
     for (let slot = 0; slot < MAX_BACKUPS; slot++) {
       await this.secrets.delete(backupKey(slot));
     }
-    for (const key of [PROFILES_KEY, BACKUPS_KEY, LAST_SWITCH_KEY, WINDOWS_KEY]) {
+    for (const key of [PROFILES_KEY, BACKUPS_KEY, LAST_SWITCH_KEY, WINDOWS_KEY, TOKEN_OWNERS_KEY]) {
       await this.mutate(key, () => undefined);
     }
   }

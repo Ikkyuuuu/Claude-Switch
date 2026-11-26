@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.15.2
+
+- **Keep an account as the one it is really signed in to.** When a sign-in, say after a login expired, picked another account in the browser, the account's card says **Wrong account**, "Signed in as …". Besides **Sign in again**, it now offers **Keep as …**: Claude is asked whose the login is, and the saved account becomes that one, under the same name and colour.
+- Signing in again to an account and choosing another one in the browser now asks whether to make the saved account that one, or to add it as a new account. Before, it was added as a new account without asking.
+- **Remove** is on the **This window** card too, next to **Edit**, and every account can be removed. A window that used the removed account goes back to the default account. Removing the default account leaves Claude signed in to it; Claude Switch only stops saving it.
+
+## 0.15.1
+
+- **Claude Switch now checks whose a login is.** Newer Claude Code versions no longer name the organization in a login's tokens, and that was how Claude Switch told logins apart. Since then, several things could go wrong with windows on different accounts: a login of another account, signed in to from a window, was saved as that window's account without notice; usage was shown under the wrong account; and Claude in one window could leave `~/.claude` unusable for the others, with "Claude's tokens and account info don't match". Now each usage check asks Claude whose login it was given, and:
+  - New tokens are saved into an account only once Claude has confirmed they are that account's. A switch asks Claude at once rather than leave a refreshed login behind.
+  - An account whose login turns out to be another account's says so on its card, **Wrong account**, "Signed in as …", with **Sign in again**, and keeps none of that account's usage.
+  - Usage numbers go to the account whose login was used, and to no other.
+  - `~/.claude` is judged by its tokens: when Claude in a window writes its account's details there, the default account's are put back, also when that window's account isn't saved in Claude Switch.
+
+## 0.15.0
+
+- **Every account's usage stays current.** Before, only the account a window uses was checked on a timer; the others showed their numbers from when they were last used, often days old. Now your other saved accounts are checked every 10 minutes too (`claudeSwitch.otherAccountsUsageCheckMinutes`; `0` turns it off), and within seconds after Claude replies on one. An account that no window uses gets its saved login lent to the check, in Claude Switch's own folder, for the few seconds the check takes; a token Claude refreshes meanwhile is saved back. Accounts whose saved login expired are skipped.
+- A usage check that fails now slows down the checks of that account only, not of all of them, and the Activity log names the account.
+
+## 0.14.3
+
+- Fixed: Claude in a window with its own account wrote that account's details into the shared `~/.claude.json`, next to the default account's tokens. Every window then said "Claude's tokens and account info don't match" and refused to switch until you signed in again. Claude Switch now puts the default account's details back by itself, within a second. Other mix-ups, such as an old login written back, are still reported.
+- Fixed: the same error when a Claude still running on an account that has a login folder of its own (one started while that account was the default, or `claude` run outside VS Code) saved that account's tokens into `~/.claude`. Meanwhile, new conversations in windows on the default account ran on the other account. Claude Switch now puts the default account's tokens back, keeps the stray ones in a backup, and says in the Activity log which account's Claude to close.
+- Fixed: after **Switch All Windows** in the instant modes, a rewritten `oauthAccount` that Claude Switch had already put back could still bring up a "Claude's login was overwritten" warning.
+- Fixed: usage checks left temporary files behind in Claude Switch's storage folder, about 10 MB over a month on one computer. When a check failed, Claude Switch stopped Claude's CLI at once, often while it was still saving its settings. Claude's CLI now exits by itself, and files left behind before are deleted at the next check.
+- Fixed: a failed usage check only said "Claude did not return the usage". The Activity log now gives the reason Claude gave.
+
 ## 0.14.2
 
 - The Marketplace lists the extension as **Claude Switch - Account per Window**: another extension already has the name Claude Switch. Inside VS Code it is still called Claude Switch.

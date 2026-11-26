@@ -2,7 +2,7 @@ import { ChildProcess, execFile, spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { withoutAuthOverrides } from './addAccount';
-import { atomicWrite, errorCode } from './claudeFiles';
+import { atomicWrite, errorCode, OAuthAccount } from './claudeFiles';
 
 export interface UsageCheckOptions {
   /** Claude Code CLI executable. */
@@ -57,7 +57,14 @@ export function askClaudeForUsage(options: UsageCheckOptions): Promise<unknown> 
   return new Promise((resolve, reject) => {
     let settled = false;
     let usage: unknown;
+    /** Claude answered with a failure, and is shutting down. */
+    let failure: Error | undefined;
     let buffer = '';
+    const fail = (err: Error) => {
+      failure ??= err;
+      // Lets it exit by itself: stopped while saving its settings, it leaves its temporary files behind.
+      child.stdin?.end();
+    };
     const finish = (err?: Error) => {
       if (settled) {
         return;
@@ -76,7 +83,7 @@ export function askClaudeForUsage(options: UsageCheckOptions): Promise<unknown> 
     };
     const timer = setTimeout(() => {
       if (usage === undefined) {
-        finish(new Error('Claude did not answer in time.'));
+        finish(failure ?? new Error('Claude did not answer in time.'));
       } else {
         // It answered but did not exit.
         stop(child, viaShell);
@@ -93,7 +100,7 @@ export function askClaudeForUsage(options: UsageCheckOptions): Promise<unknown> 
       if (usage !== undefined) {
         finish();
       } else {
-        finish(new Error(`Claude exited (code ${code}) without the usage.`));
+        finish(failure ?? new Error(`Claude exited (code ${code}) without the usage.`));
       }
     });
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -107,12 +114,13 @@ export function askClaudeForUsage(options: UsageCheckOptions): Promise<unknown> 
           if (response.subtype === 'success') {
             send('usage', { subtype: 'get_usage', skip_behaviors: true });
           } else {
-            finish(new Error('Claude did not start a session.'));
+            fail(new Error(withReason('Claude did not start a session', response.error)));
           }
         } else if (response?.request_id === 'usage') {
           const rateLimits = field(response.response, 'rate_limits');
           if (response.subtype !== 'success' || typeof rateLimits !== 'object' || rateLimits === null) {
-            finish(new Error('Claude did not return the usage.'));
+            const none = field(response.response, 'rate_limits_available') === false ? 'none is available for this account' : undefined;
+            fail(new Error(withReason('Claude did not return the usage', response.error ?? none)));
           } else {
             usage = rateLimits;
             child.stdin?.end();
@@ -162,9 +170,10 @@ export function usageCheckDue(s: UsageSchedule): boolean {
 }
 
 /**
- * Clears the usage numbers the CLI saved in a usage check's own settings
- * folder (its CLAUDE_CONFIG_DIR, never ~/.claude). The CLI reuses numbers
- * younger than a minute; with none saved, it fetches fresh ones.
+ * Clears what the CLI saved in a usage check's own settings folder (its
+ * CLAUDE_CONFIG_DIR, never ~/.claude) at earlier checks: the usage numbers,
+ * which it reuses for a minute, and the account it found its login to be, so
+ * this check finds out both afresh. See checkedAccount().
  */
 export async function forgetSavedUsage(configDir: string): Promise<void> {
   const file = path.join(configDir, '.claude.json');
@@ -178,13 +187,53 @@ export async function forgetSavedUsage(configDir: string): Promise<void> {
     }
     return;
   }
-  if (typeof config === 'object' && config !== null && 'cachedUsageUtilization' in config) {
+  if (typeof config === 'object' && config !== null && ('cachedUsageUtilization' in config || 'oauthAccount' in config)) {
     delete (config as Record<string, unknown>).cachedUsageUtilization;
+    delete (config as Record<string, unknown>).oauthAccount;
     await atomicWrite(file, JSON.stringify(config, null, 2));
   }
 }
 
-function controlResponse(line: string): { request_id?: unknown; subtype?: unknown; response?: unknown } | undefined {
+/**
+ * After a usage check: the account whose login Claude was given, as Claude
+ * looked it up for itself and saved in the check's settings folder. Claude
+ * Code's tokens no longer say whose they are, so this is how Claude Switch
+ * knows. undefined when Claude saved none, say when it could not look it up.
+ */
+export async function checkedAccount(configDir: string): Promise<OAuthAccount | undefined> {
+  try {
+    const account = (JSON.parse(await fs.readFile(path.join(configDir, '.claude.json'), 'utf8')) as { oauthAccount?: unknown }).oauthAccount;
+    return typeof account === 'object' && account !== null && typeof (account as OAuthAccount).accountUuid === 'string' && typeof (account as OAuthAccount).emailAddress === 'string'
+      ? (account as OAuthAccount)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Deletes what a Claude stopped while saving its settings left in a usage check's own settings folder (never
+ * ~/.claude): its temporary files, such as .claude.json.tmp.<pid>.<random>, and its lock on .claude.json.
+ * Call only while no usage check runs there. Returns how many went.
+ */
+export async function clearInterruptedSaves(configDir: string): Promise<number> {
+  const names = await fs.readdir(configDir).catch(() => [] as string[]);
+  const leftovers = names.filter((name) => /\.tmp(\.|$)/.test(name) || name === '.claude.json.lock');
+  for (const name of leftovers) {
+    await fs.rm(path.join(configDir, name), { recursive: true, force: true });
+  }
+  return leftovers.length;
+}
+
+/** "Claude did not …: why", with Claude's own reason when it gave one. */
+function withReason(message: string, reason: unknown): string {
+  const why = typeof reason === 'string' ? reason.trim().replace(/\.$/, '').slice(0, 200) : '';
+  return why ? `${message}: ${why}.` : `${message}.`;
+}
+
+type ControlResponse = { request_id?: unknown; subtype?: unknown; response?: unknown; error?: unknown };
+
+function controlResponse(line: string): ControlResponse | undefined {
   if (!line.includes('"control_response"')) {
     return undefined;
   }
@@ -192,7 +241,7 @@ function controlResponse(line: string): { request_id?: unknown; subtype?: unknow
     const message = JSON.parse(line) as unknown;
     const response = field(message, 'response');
     return field(message, 'type') === 'control_response' && typeof response === 'object' && response !== null
-      ? (response as { request_id?: unknown; subtype?: unknown; response?: unknown })
+      ? (response as ControlResponse)
       : undefined;
   } catch {
     return undefined;

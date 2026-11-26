@@ -358,7 +358,8 @@ export class AccountsView implements vscode.WebviewViewProvider, vscode.Disposab
     });
 
     this.description = live.kind === 'known' ? live.profile.alias : undefined;
-    const expired = profiles.filter((p) => p.status === 'needs-relogin').length;
+    // Expired, or another account's: either way, it needs a new sign-in.
+    const expired = profiles.filter((p) => p.status === 'needs-relogin' || p.signedInAs).length;
     const unsaved = live.kind === 'unknown';
     const reasons = [
       reloadPending ? 'reload this window to use the new account' : undefined,

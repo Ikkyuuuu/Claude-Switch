@@ -74,6 +74,7 @@ function accountCard(profile: ProfileMeta, now: number): AccountCard {
     initials: initialsOf(profile.alias),
     avatar: colourOf(profile),
     expired: profile.status === 'needs-relogin',
+    signedInAs: profile.signedInAs,
     lastUsedAt: profile.lastUsedAt,
     plan: profile.plan?.label,
     usage: profile.usage && { updatedAt: profile.usage.fetchedAt, meters: usageMeters(profile.usage) },
@@ -131,7 +132,7 @@ const SIMPLE_MESSAGES = new Set([
   'signInCancel',
   'openBilling',
 ]);
-const PROFILE_MESSAGES = new Set(['switch', 'rename', 'remove', 'setRenewal', 'signInAgain']);
+const PROFILE_MESSAGES = new Set(['switch', 'rename', 'remove', 'setRenewal', 'signInAgain', 'keepSignedIn']);
 
 /** Validates a message from the webview. Anything unexpected returns undefined. */
 export function parseMessage(raw: unknown): WebviewMessage | undefined {

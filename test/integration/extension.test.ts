@@ -156,8 +156,9 @@ suite('Claude Switch in VS Code', () => {
     const { work } = profiles();
     const workLogin = await api.store.getLogin(work.id);
     assert.ok(workLogin);
-    // Work's tokens next to Personal's identity: the default account is Work, but the files disagree.
-    await writeLive(api.paths, { credentialsRaw: workLogin.credentialsRaw, account: fakeLogin('Personal').account });
+    // Tokens of an account that isn't saved next to Personal's identity: the files disagree, and nothing says
+    // which account the default is.
+    await writeLive(api.paths, { credentialsRaw: fakeLogin('Stranger').credentialsRaw, account: fakeLogin('Personal').account });
     try {
       await api.controller.switchAccount({ profileId: work.id });
       await waitFor(async () => (api.view.currentNotices.some((n) => n.level === 'error' && n.text.includes("don't match")) ? true : undefined));
@@ -166,6 +167,31 @@ suite('Claude Switch in VS Code', () => {
     } finally {
       await writeLive(api.paths, workLogin);
       await api.controller.refresh();
+    }
+    assert.match(api.statusText(), /\$\(account\) Work/);
+  });
+
+  test("puts back the default account's details that this window's Claude wrote into ~/.claude.json", async () => {
+    const { work, personal } = profiles();
+    const workLogin = await api.store.getLogin(work.id);
+    assert.ok(workLogin);
+    await api.controller.switchAccount({ profileId: personal.id });
+    // Errors stay until dismissed; only one shown from here on would be this test's.
+    const earlier = new Set(api.view.currentNotices.map((n) => n.id));
+    try {
+      // Claude in this window, which uses Personal, wrote Personal's details into the shared ~/.claude.json,
+      // next to Work's tokens.
+      await writeLive(api.paths, { credentialsRaw: workLogin.credentialsRaw, account: fakeLogin('Personal').account });
+      await api.controller.refresh();
+      const live = await readSnapshot(api.paths);
+      assert.equal(live.credentialsRaw, workLogin.credentialsRaw, "Work's tokens are left alone");
+      assert.equal(live.account?.emailAddress, workLogin.account.emailAddress, "Work's details are back");
+      assert.match(api.statusText(), /\$\(account\) Personal/, 'this window still uses Personal');
+      assert.equal(api.view.state.windowNote, 'Other windows use Work unless you switch them.');
+      assert.ok(!api.view.currentNotices.some((n) => n.level === 'error' && !earlier.has(n.id)), 'no error to dismiss');
+    } finally {
+      await writeLive(api.paths, workLogin);
+      await api.controller.switchAccount({ profileId: work.id });
     }
     assert.match(api.statusText(), /\$\(account\) Work/);
   });
@@ -270,6 +296,72 @@ suite('Claude Switch in VS Code', () => {
     assert.equal(api.store.get(work.id)?.usage?.session?.percent, 87, "the default account's numbers stay");
 
     await api.controller.switchAccount({ profileId: work.id });
+  });
+
+  test("says when an account's login turns out to be another account's, and keeps that account's numbers off it", async () => {
+    const { personal } = profiles();
+    const askUsage = api.controller.askUsage;
+    // Given Personal's login, Claude looks its account up and finds another one: signed in to from a window, say.
+    api.controller.askUsage = async (options) => {
+      const configDir = options.env?.CLAUDE_CONFIG_DIR;
+      if (configDir?.endsWith(personal.id)) {
+        await fs.writeFile(path.join(configDir, '.claude.json'), JSON.stringify({ oauthAccount: fakeLogin('Other').account }));
+      }
+      return askUsage(options);
+    };
+    usageReply = { five_hour: { utilization: 99 }, seven_day: { utilization: 99 } };
+    try {
+      // A check of another account may be under way; this one follows it.
+      await waitFor(async () => {
+        await api.controller.checkUsage(personal.id);
+        return api.store.get(personal.id)?.signedInAs;
+      });
+      assert.equal(api.store.get(personal.id)?.signedInAs, 'other@example.test');
+      assert.notEqual(api.store.get(personal.id)?.usage?.session?.percent, 99, "the other account's numbers are not Personal's");
+      assert.equal(api.view.state.others.find((card) => card.id === personal.id)?.signedInAs, 'other@example.test', 'the tab says so');
+      await waitFor(async () => (api.view.currentNotices.some((n) => n.level === 'warning' && n.text.includes('is signed in as other@example.test')) ? true : undefined));
+    } finally {
+      api.controller.askUsage = askUsage;
+    }
+    // Signing in to it again puts it right.
+    const login = await api.store.getLogin(personal.id);
+    assert.ok(login);
+    await api.store.updateLogin(personal.id, login);
+    await api.controller.refresh();
+    assert.equal(api.view.state.others.find((card) => card.id === personal.id)?.signedInAs, undefined);
+  });
+
+  test('keeps the usage of every saved account current, lending the login of one no window uses', async () => {
+    const other = await api.store.add('Other', fakeLogin('Other'));
+    const focused = api.controller.windowFocused;
+    const askUsage = api.controller.askUsage;
+    let lentDir: string | undefined;
+    let lent: string | undefined;
+    api.controller.windowFocused = () => true;
+    api.controller.askUsage = async (options) => {
+      const loginDir = options.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+      if (loginDir?.endsWith(other.id)) {
+        lentDir = loginDir;
+        lent = await fs.readFile(path.join(loginDir, '.credentials.json'), 'utf8');
+      }
+      return askUsage(options);
+    };
+    usageReply = { five_hour: { utilization: 5 }, seven_day: { utilization: 50 } };
+    try {
+      // Never checked: due at once, though it is neither the default account nor used by a window.
+      await waitFor(async () => {
+        api.controller.checkUsageIfDue();
+        return api.store.get(other.id)?.usage ? true : undefined;
+      });
+      assert.equal(api.store.get(other.id)?.usage?.weekly?.percent, 50);
+      assert.equal(lent, (await api.store.getLogin(other.id))?.credentialsRaw, 'Claude got its saved login');
+      assert.ok(lentDir && !api.window.folders.has(other.id), 'in its usage folder, not a login folder');
+      await assert.rejects(fs.access(path.join(lentDir, '.credentials.json')), 'for the check only');
+    } finally {
+      api.controller.askUsage = askUsage;
+      api.controller.windowFocused = focused;
+      await api.store.remove(other.id);
+    }
   });
 
   test('notices Claude replying, to check usage right after', async () => {
@@ -445,6 +537,25 @@ suite('Claude Switch in VS Code', () => {
     await waitFor(async () => (api.view.currentNotices.some((n) => n.level === 'success' && n.text.includes('New Org')) ? true : undefined));
     // The view drops the sign-in card and lists the new account once it refreshes.
     await waitFor(async () => (!api.view.state.signIn && summary().others.includes('New Org') ? true : undefined));
+  });
+
+  test('removes the account this window uses too, and the window goes back to the default account', async () => {
+    const temp = await api.store.add('Temp', fakeLogin('Temp'));
+    await api.controller.switchAccount({ profileId: temp.id });
+    assert.equal(api.window.loginDir, api.window.folders.dirOf(temp.id));
+
+    // The Remove button on the This window card.
+    api.view.receive({ type: 'remove', profileId: temp.id });
+    const confirm = await waitFor(async () => {
+      const p = api.view.currentPrompt;
+      return p?.kind === 'confirm' ? p : undefined;
+    });
+    assert.match(confirm.message ?? '', /goes back to the default account, "Work"/);
+    api.view.receive({ type: 'promptResult', id: confirm.id, action: 'remove' });
+    await waitFor(async () => (api.store.get(temp.id) ? undefined : true));
+    await waitFor(async () => (api.window.loginDir === undefined ? true : undefined));
+    assert.ok(!api.window.folders.has(temp.id), 'its login folder goes too');
+    await waitFor(async () => (/\$\(account\) Work/.test(api.statusText()) ? true : undefined));
   });
 
   test('asks inside the tab before removing an account', async () => {
