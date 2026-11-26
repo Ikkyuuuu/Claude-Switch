@@ -45,6 +45,23 @@ export function fakeLogin(name: string, options: FakeCredentialsOptions = {}): S
   return { credentialsRaw: fakeCredentials(name, options), account: fakeAccount(name, options.org) };
 }
 
+/**
+ * Stands in for asking Claude's CLI whose login a folder holds: reads the name
+ * fakeCredentials() put in the access token. undefined for no login there.
+ */
+export async function fakeIdentify(loginDir: string): Promise<OAuthAccount | undefined> {
+  try {
+    const credentials = JSON.parse(await fs.readFile(path.join(loginDir, '.credentials.json'), 'utf8')) as {
+      claudeAiOauth?: { accessToken?: string };
+      organizationUuid?: string;
+    };
+    const name = /^fake-access-(.+)-\d+$/.exec(credentials.claudeAiOauth?.accessToken ?? '')?.[1];
+    return name ? fakeAccount(name, credentials.organizationUuid) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The cachedUsageUtilization entry Claude Code keeps in .claude.json (trimmed). */
 export function fakeUsageCache(account: OAuthAccount, fetchedAtMs: number, session = 42, weekly = 61): object {
   const window = (utilization: number, hours: number) => ({

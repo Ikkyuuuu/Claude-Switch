@@ -12,6 +12,8 @@ export interface AccountCard {
   avatar: number;
   /** The saved login's refresh token has expired. */
   expired: boolean;
+  /** The saved login turned out to be this other account's: Claude on this account runs as it. */
+  signedInAs?: string;
   lastUsedAt?: string;
   /** For example "Pro", "Max 20x" or "Team". */
   plan?: string;
@@ -66,8 +68,10 @@ export type WebviewMessage =
   | { type: 'rename'; profileId: string }
   | { type: 'remove'; profileId: string }
   | { type: 'setRenewal'; profileId: string }
-  /** "Sign in again" on an account whose saved login expired. */
+  /** "Sign in again" on an account whose saved login expired, or is another account's. */
   | { type: 'signInAgain'; profileId: string }
+  /** "Keep as …" on an account whose saved login is another account's: makes it that account. */
+  | { type: 'keepSignedIn'; profileId: string }
   | { type: 'openBilling' }
   | { type: 'add' }
   | { type: 'saveCurrent' }

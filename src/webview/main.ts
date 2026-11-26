@@ -516,19 +516,30 @@ function currentCard(current: SwitchViewState['current']): HTMLElement {
               { class: 'card-status' },
               a.expired
                 ? h('span', { class: 'pill warn' }, icon('warning'), 'Sign-in expired')
-                : h('span', { class: 'pill ok' }, 'Active'),
+                : a.signedInAs
+                  ? h('span', { class: 'pill warn' }, icon('warning'), 'Wrong account')
+                  : h('span', { class: 'pill ok' }, 'Active'),
               a.plan ? h('span', { class: 'pill plan' }, a.plan) : null,
             ),
-            a.expired
+            a.expired || a.signedInAs
               ? h(
                   'p',
                   { class: 'hint' },
-                  'This saved login has expired. ',
+                  a.expired ? 'This saved login has expired. ' : `This saved login is ${a.signedInAs}'s, so Claude here runs as that account. `,
                   h('button', { class: 'link', onclick: () => send({ type: 'signInAgain', profileId: a.id }) }, 'Sign in again'),
+                  a.signedInAs && !a.expired ? ' or ' : null,
+                  a.signedInAs && !a.expired
+                    ? h('button', { class: 'link', onclick: () => send({ type: 'keepSignedIn', profileId: a.id }) }, `keep as ${a.signedInAs}`)
+                    : null,
                 )
               : null,
           ),
-          h('div', { class: 'card-actions' }, iconButton('pencil', `Edit ${a.alias}`, () => send({ type: 'rename', profileId: a.id }))),
+          h(
+            'div',
+            { class: 'card-actions' },
+            iconButton('pencil', `Edit ${a.alias}`, () => send({ type: 'rename', profileId: a.id })),
+            iconButton('trash', `Remove ${a.alias}`, () => send({ type: 'remove', profileId: a.id })),
+          ),
         ),
         usagePanel(a),
         renewalLine(a),
@@ -575,7 +586,7 @@ function accountRow(a: AccountCard): HTMLElement {
   return h(
     'div',
     {
-      class: ['row', a.expired ? 'expired' : '', waiting ? 'waiting' : ''].filter(Boolean).join(' '),
+      class: ['row', a.expired || a.signedInAs ? 'expired' : '', waiting ? 'waiting' : ''].filter(Boolean).join(' '),
       title: [switchLabel(a), usageSummary(a), lastUsed(a)].filter(Boolean).join('\n'),
       'data-vscode-context': context('profile', a.id),
     },
@@ -583,7 +594,7 @@ function accountRow(a: AccountCard): HTMLElement {
     h('button', {
       class: 'row-hit',
       type: 'button',
-      'aria-label': `${switchLabel(a)}, ${a.email}${a.expired ? ', sign-in expired' : ''}`,
+      'aria-label': `${switchLabel(a)}, ${a.email}${a.expired ? ', sign-in expired' : ''}${a.signedInAs ? `, signed in as ${a.signedInAs}` : ''}`,
       'aria-disabled': waiting ? 'true' : 'false',
       'data-focus': `row:${a.id}`,
       onclick: switchTo,
@@ -596,10 +607,11 @@ function accountRow(a: AccountCard): HTMLElement {
         'div',
         { class: 'row-title' },
         h('span', { class: 'name' }, a.alias),
-        a.expired ? h('span', { class: 'pill warn' }, 'Expired') : null,
-        a.plan && !a.expired ? h('span', { class: 'pill plan' }, a.plan) : null,
+        a.expired ? h('span', { class: 'pill warn' }, 'Expired') : a.signedInAs ? h('span', { class: 'pill warn' }, 'Wrong account') : null,
+        a.plan && !a.expired && !a.signedInAs ? h('span', { class: 'pill plan' }, a.plan) : null,
       ),
       h('div', { class: 'row-sub' }, a.email),
+      a.signedInAs ? h('div', { class: 'row-sub' }, `Signed in as ${a.signedInAs}`) : null,
       miniUsage(a),
     ),
     // Shown over the end of the row on hover, so names use the full width otherwise.
@@ -608,7 +620,7 @@ function accountRow(a: AccountCard): HTMLElement {
       { class: 'row-end' },
       iconButton('pencil', `Edit ${a.alias}`, () => send({ type: 'rename', profileId: a.id })),
       iconButton('trash', `Remove ${a.alias}`, () => send({ type: 'remove', profileId: a.id })),
-      h('span', { class: 'go', 'aria-hidden': 'true' }, a.expired ? 'Sign in' : 'Switch', icon('arrow')),
+      h('span', { class: 'go', 'aria-hidden': 'true' }, a.expired || a.signedInAs ? 'Sign in' : 'Switch', icon('arrow')),
     ),
   );
 }

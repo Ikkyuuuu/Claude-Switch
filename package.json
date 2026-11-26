@@ -2,7 +2,7 @@
   "name": "claude-switch-accounts",
   "displayName": "Claude Switch - Account per Window",
   "description": "Switch which Claude account the Claude Code extension and CLI use. Not affiliated with Anthropic.",
-  "version": "0.14.2",
+  "version": "0.15.2",
   "publisher": "wattanun42",
   "license": "MIT",
   "repository": {
@@ -219,7 +219,7 @@
         },
         {
           "command": "claudeSwitch.remove",
-          "when": "webviewId == 'claudeSwitch.accounts' && webviewSection == 'profile'",
+          "when": "webviewId == 'claudeSwitch.accounts' && webviewSection =~ /^(profile|activeProfile)$/",
           "group": "2_edit@2"
         },
         {
@@ -268,6 +268,13 @@
           "minimum": 0,
           "scope": "application",
           "markdownDescription": "How often, in seconds, Claude Switch asks Claude Code for the current usage of this window's account while Claude is idle. A few seconds after Claude replies, in any window, it checks anyway, so the numbers follow your use; this setting catches usage elsewhere, such as on claude.ai. The VS Code window you are in does the checks, for the account that replied, and every window shows the result. Claude Code's own CLI fetches the numbers, the way its Account & Usage panel does; Claude Switch never handles your token or makes the request itself. If a check fails, for example because Anthropic is limiting requests, the next one waits longer. `0` turns usage checks off; values below 10 count as 10."
+        },
+        "claudeSwitch.otherAccountsUsageCheckMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "scope": "application",
+          "markdownDescription": "How often, in minutes, Claude Switch also checks the usage of your other saved accounts, the ones this window doesn't use, so every card stays current. Their usage changes only when they are used elsewhere, such as on claude.ai or in another window, so these checks can be less frequent than `#claudeSwitch.usageCheckSeconds#`; an account Claude replies on is checked within seconds anyway. An account that no window uses gets its saved login lent to the check, in Claude Switch's own folder, and a token Claude refreshes meanwhile is saved back. Accounts whose saved login expired are skipped. `0` turns these checks off; values below 1 count as 1. Off too while `#claudeSwitch.usageCheckSeconds#` is `0`."
         },
         "claudeSwitch.autoRefreshSeconds": {
           "type": "number",

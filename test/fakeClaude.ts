@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { resolvePaths } from '../src/claudeFiles';
 import { fakeLogin, writeLive } from './fixtures';
 
@@ -13,7 +14,8 @@ import { fakeLogin, writeLive } from './fixtures';
  *
  * With --input-format stream-json, answers control requests the way the real
  * CLI does, with FAKE_USAGE (JSON) as get_usage's rate_limits, then exits when
- * its input closes. FAKE_CLAUDE_MODE:
+ * its input closes, a moment later: like the real CLI, it saves its settings
+ * first, and then writes the FAKE_SAVED file if set. FAKE_CLAUDE_MODE:
  *   usage       - answers
  *   usage-error - fails get_usage
  *   usage-hang  - never answers get_usage
@@ -55,11 +57,18 @@ function answerControlRequests(): void {
           response: { subscription_type: 'pro', rate_limits_available: true, rate_limits: JSON.parse(process.env.FAKE_USAGE ?? '{}') },
         });
       } else if (message.request.subtype === 'get_usage' && mode === 'usage-error') {
-        respond(message.request_id, { subtype: 'error', error: 'not available' });
+        respond(message.request_id, { subtype: 'error', error: 'get_usage failed: Rate limited.' });
       }
     }
   });
-  process.stdin.on('end', () => process.exit(0));
+  process.stdin.on('end', () =>
+    setTimeout(() => {
+      if (process.env.FAKE_SAVED) {
+        writeFileSync(process.env.FAKE_SAVED, 'saved');
+      }
+      process.exit(0);
+    }, 200),
+  );
 }
 
 function signIn(): void {

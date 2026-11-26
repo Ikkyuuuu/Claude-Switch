@@ -8,6 +8,8 @@ import { ProfileMeta, ProfileStore } from '../../src/profileStore';
 import { acquireLock, LockBusyError, Step, SwitchEngine, SwitchError } from '../../src/switchEngine';
 import { LoginFolders } from '../../src/windowAccounts';
 import {
+  fakeAccount,
+  fakeIdentify,
   fakeLogin,
   fakeUsageCache,
   makeFakeHome,
@@ -18,6 +20,11 @@ import {
   removeFakeHomes,
   writeLive,
 } from '../fixtures';
+
+/** Credentials as newer Claude Code versions write them: without the organization. */
+function withoutOrganization(credentialsRaw: string): string {
+  return JSON.stringify({ ...JSON.parse(credentialsRaw), organizationUuid: undefined });
+}
 
 suite('SwitchEngine', () => {
   let home: string;
@@ -43,6 +50,7 @@ suite('SwitchEngine', () => {
       lockWaitMs: 600,
       settleMs: 1,
       now: () => now,
+      identify: fakeIdentify,
       onStep: async (step) => {
         await onStep?.(step);
         if (step === failAt) {
@@ -97,9 +105,12 @@ suite('SwitchEngine', () => {
     const messages: string[] = [];
     const lockFile = path.join(home, 'storage', 'switch.lock');
     engine = new SwitchEngine(paths, store, { ...silentLogger, info: (m) => messages.push(m) }, { lockFile, settleMs: 1, now: () => now });
+    // A usage check: Claude says whose login ~/.claude holds.
+    const confirm = () => engine.checkUsage(async () => ({ utilization: undefined, owner: fakeAccount('A') }));
     // Add Account for the account Claude is already signed in to: a fresh login, newer than the live one.
     const newer = fakeLogin('A', { version: 5 });
     await store.updateLogin(work.id, newer);
+    await confirm();
 
     // Auto-refresh runs every few seconds.
     for (let i = 0; i < 3; i++) {
@@ -108,11 +119,16 @@ suite('SwitchEngine', () => {
     assert.equal((await store.getLogin(work.id))?.credentialsRaw, newer.credentialsRaw);
     assert.equal(messages.filter((m) => m.startsWith('Kept the saved login')).length, 1, messages.join('\n'));
 
-    // Once Claude refreshes the live login past the saved one, it is saved as usual.
+    // Once Claude refreshes the live login past the saved one, it is saved, as soon as a usage check confirms whose it is.
     const refreshed = fakeLogin('A', { version: 9 });
     await writeLive(paths, refreshed);
     await engine.refresh();
+    assert.equal((await store.getLogin(work.id))?.credentialsRaw, newer.credentialsRaw, 'not before then');
+    assert.ok(engine.unconfirmed.has(work.id), 'the controller checks it soon');
+    await confirm();
+    await engine.refresh();
     assert.equal((await store.getLogin(work.id))?.credentialsRaw, refreshed.credentialsRaw);
+    assert.ok(!engine.unconfirmed.has(work.id));
   });
 
   test('does nothing when the profile is already active', async () => {
@@ -281,6 +297,14 @@ suite('SwitchEngine', () => {
     await writeLive(paths, { credentialsRaw: loginB.credentialsRaw, account: loginA.account });
     assert.equal(await engine.keepSwitch(personal.id), 'repaired');
     assert.deepEqual((await readSnapshot(paths)).account, loginB.account);
+    // Asked again, now that it is put right: nothing to do.
+    assert.equal(await engine.keepSwitch(personal.id), 'ok');
+
+    // Only the old tokens came back, next to the right account details: still a mix-up.
+    const oldTokens = { credentialsRaw: loginA.credentialsRaw, account: loginB.account };
+    await writeLive(paths, oldTokens);
+    assert.equal(await engine.keepSwitch(personal.id), 'mismatch');
+    assert.deepEqual(await readSnapshot(paths), oldTokens, 'leaves the files alone');
 
     // The old tokens came back too: only the user can fix that, by closing the old conversation.
     await writeLive(paths, loginA);
@@ -290,7 +314,7 @@ suite('SwitchEngine', () => {
 
   test("keeps Claude's current usage with the live account", async () => {
     const utilization = { five_hour: { utilization: 88, resets_at: new Date(now + 3_600_000).toISOString() }, seven_day: { utilization: 32 } };
-    assert.equal(await engine.checkUsage(async () => utilization), true);
+    assert.equal((await engine.checkUsage(async () => ({ utilization }))).updated, true);
     assert.equal(store.get(work.id)?.usage?.session?.percent, 88);
     assert.equal(store.get(work.id)?.usage?.weekly?.percent, 32);
     assert.equal(store.get(personal.id)?.usage, undefined);
@@ -300,22 +324,22 @@ suite('SwitchEngine', () => {
     const utilization = { five_hour: { utilization: 50 } };
     const changed = await engine.checkUsage(async () => {
       await writeLive(paths, loginB);
-      return utilization;
+      return { utilization };
     });
-    assert.equal(changed, false);
+    assert.equal(changed.updated, false);
     assert.equal(store.get(work.id)?.usage, undefined);
     assert.equal(store.get(personal.id)?.usage, undefined);
   });
 
   test('a usage check holds the switch lock, and a switch waits for it', async () => {
     let finishCheck: () => void = () => undefined;
-    const check = engine.checkUsage(() => new Promise((resolve) => (finishCheck = () => resolve({ five_hour: { utilization: 1 } }))));
+    const check = engine.checkUsage(() => new Promise((resolve) => (finishCheck = () => resolve({ utilization: { five_hour: { utilization: 1 } } }))));
     await new Promise((resolve) => setTimeout(resolve, 50));
     // Another background check skips its turn rather than queueing.
-    await assert.rejects(engine.checkUsage(async () => ({})), LockBusyError);
+    await assert.rejects(engine.checkUsage(async () => ({ utilization: {} })), LockBusyError);
     const switching = engine.switchTo(personal.id);
     setTimeout(() => finishCheck(), 200);
-    assert.equal(await check, true);
+    assert.equal((await check).updated, true);
     assert.equal((await switching).outcome, 'switched');
   });
 
@@ -411,22 +435,239 @@ suite('SwitchEngine', () => {
     assert.deepEqual(live.account, stranger.account);
   });
 
-  test('saves tokens refreshed in a login folder only when they are newer and the right organization', async () => {
+  test("puts back the default account's details that a window with its own account wrote into .claude.json", async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    // A window uses Personal through its own login folder; Work is the default account.
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    // Claude in that window wrote Personal's details into the shared .claude.json, next to Work's tokens.
+    await writeLive(paths, { credentialsRaw: loginA.credentialsRaw, account: loginB.account });
+    assert.equal((await engine.detect()).kind, 'error');
+
+    const live = await engine.refresh(folders);
+    assert.equal(live.kind === 'known' && live.profile.id, work.id);
+    assert.deepEqual(await readSnapshot(paths), loginA, "Work's details are back, and its tokens untouched");
+    const config = JSON.parse((await readFiles(paths)).config);
+    assert.deepEqual({ ...config, oauthAccount: undefined }, { ...OTHER_CONFIG, oauthAccount: undefined }, 'every other key is kept');
+
+    // Also once Claude has refreshed Work's tokens: they are still the only saved ones of Work's organization.
+    const refreshed = fakeLogin('A', { version: 3 });
+    await writeLive(paths, { credentialsRaw: refreshed.credentialsRaw, account: loginB.account });
+    assert.equal((await engine.refresh(folders)).kind, 'known');
+    assert.deepEqual((await readSnapshot(paths)).account, loginA.account);
+  });
+
+  test("puts back the default account's tokens that a Claude on another account saved into ~/.claude", async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    // Work is the default account; Personal lives in a login folder of its own.
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    // A Claude still running on Personal outside its folder refreshed its login into ~/.claude.
+    const stray = { credentialsRaw: fakeLogin('B', { version: 4 }).credentialsRaw, account: loginA.account };
+    await writeLive(paths, stray);
+
+    const live = await engine.refresh(folders);
+    assert.equal(live.kind === 'known' && live.profile.id, work.id);
+    assert.deepEqual(await readSnapshot(paths), loginA, "Work's own login is back");
+    assert.deepEqual(await store.getBackup(store.listBackups()[0].slot), stray, 'the stray tokens are kept in a backup');
+    assert.equal((await store.getLogin(personal.id))?.credentialsRaw, loginB.credentialsRaw, "and not saved into Personal's account");
+    assert.equal(await folders.read(personal.id), loginB.credentialsRaw, "Personal's folder is left alone");
+  });
+
+  test('leaves a mix-up of the login files it cannot explain for the user to see', async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    // No window uses Personal, so its details did not come from one: an old login was written back.
+    const writtenBack = { credentialsRaw: loginA.credentialsRaw, account: loginB.account };
+    await writeLive(paths, writtenBack);
+    assert.equal((await engine.refresh(folders)).kind, 'error');
+    assert.deepEqual(await readSnapshot(paths), writtenBack);
+
+    // A window uses Personal, but the tokens next to its details are no saved account's.
+    await writeLive(paths, loginA);
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    const stranger = { credentialsRaw: fakeLogin('Stranger').credentialsRaw, account: loginB.account };
+    await writeLive(paths, stranger);
+    assert.equal((await engine.refresh(folders)).kind, 'error');
+    assert.deepEqual(await readSnapshot(paths), stranger);
+
+    // Both halves belong to accounts with a login folder: neither can be told to be the stray one.
+    await folders.write(work.id, loginA.credentialsRaw);
+    const both = { credentialsRaw: fakeLogin('B', { version: 4 }).credentialsRaw, account: loginA.account };
+    await writeLive(paths, both);
+    assert.equal((await engine.refresh(folders)).kind, 'error');
+    assert.deepEqual(await readSnapshot(paths), both);
+  });
+
+  test("saves tokens refreshed in a login folder only once confirmed the account's own, and newer", async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    const dir = folders.dirOf(personal.id);
+    // Not known yet to be Personal's: they wait for a usage check, or a switch, to ask Claude whose they are.
     const newer = fakeLogin('B', { version: 3 }).credentialsRaw;
+    await folders.write(personal.id, newer);
     await engine.syncFolder(personal.id, newer);
+    assert.equal((await store.getLogin(personal.id))?.credentialsRaw, loginB.credentialsRaw);
+    assert.ok(engine.unconfirmed.has(personal.id));
+    await engine.syncFolder(personal.id, newer, dir);
     assert.equal((await store.getLogin(personal.id))?.credentialsRaw, newer);
+    assert.ok(!engine.unconfirmed.has(personal.id));
     // Older than what is saved, another organization's tokens, not JSON.
     for (const rejected of [fakeLogin('B', { version: 1 }).credentialsRaw, fakeLogin('Z', { version: 9 }).credentialsRaw, 'garbage']) {
-      await engine.syncFolder(personal.id, rejected);
+      await folders.write(personal.id, rejected);
+      await engine.syncFolder(personal.id, rejected, dir);
       assert.equal((await store.getLogin(personal.id))?.credentialsRaw, newer);
     }
   });
 
+  test("never takes another account's login, signed in to from a window, for the account's own", async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    // In the window that uses Personal, Claude was signed in to another account, in the newer format that
+    // no longer names the organization: nothing in the tokens says they aren't Personal's.
+    const other = withoutOrganization(fakeLogin('Other', { version: 9 }).credentialsRaw);
+    await folders.write(personal.id, other);
+    await engine.syncFolder(personal.id, other);
+    assert.equal((await store.getLogin(personal.id))?.credentialsRaw, loginB.credentialsRaw, 'not taken unconfirmed');
+
+    // Its usage check: Claude says whose login it was given. The numbers are kept with no account, and Personal says whose its login is.
+    const result = await engine.checkUsage(async () => ({ utilization: { five_hour: { utilization: 70 } }, owner: fakeAccount('Other') }), personal.id, { folders });
+    assert.deepEqual(result, { updated: false, signedInAs: 'other@example.test' });
+    assert.equal(store.get(personal.id)?.signedInAs, 'other@example.test');
+    assert.equal(store.get(personal.id)?.usage, undefined, "its numbers are not Personal's");
+    // Not even a switch, which confirms tokens at once, takes them.
+    await engine.syncFolder(personal.id, other, folders.dirOf(personal.id));
+    assert.equal((await store.getLogin(personal.id))?.credentialsRaw, loginB.credentialsRaw);
+
+    // Signing in to Personal again puts it right.
+    await store.updateLogin(personal.id, fakeLogin('B', { version: 12 }));
+    assert.equal(store.get(personal.id)?.signedInAs, undefined);
+  });
+
+  test('makes an account the one its login turned out to be, keeping its name and colour', async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    await store.edit(personal.id, { alias: 'Personal', color: 7 });
+    await store.setRenewal(personal.id, { date: '2026-12-20', cycle: 'monthly' });
+    // The sign-in in the window that uses Personal picked another account in the browser.
+    const other = withoutOrganization(fakeLogin('Other', { version: 3 }).credentialsRaw);
+    await folders.write(personal.id, other);
+    await engine.checkUsage(async () => ({ utilization: undefined, owner: fakeAccount('Other') }), personal.id, { folders });
+    assert.equal(store.get(personal.id)?.signedInAs, 'other@example.test');
+
+    // Keep it as that account: Claude is asked whose the login is, in the window's login folder.
+    const kept = await engine.keepAsSignedIn(personal.id, folders, path.join(home, 'storage', 'usage', personal.id));
+    assert.equal(kept.alias, 'Personal');
+    assert.equal(kept.color, 7);
+    assert.equal(kept.email, 'other@example.test');
+    assert.equal(kept.signedInAs, undefined);
+    assert.equal(kept.renewal, undefined, "Personal's renewal date was its own");
+    assert.deepEqual(await store.getLogin(personal.id), { credentialsRaw: other, account: fakeAccount('Other') });
+    assert.equal(store.findByAccount(fakeAccount('Other'))?.id, personal.id);
+  });
+
+  test("keeps an account no window uses as the one its saved login is, asking Claude with the login lent", async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    const dir = path.join(home, 'storage', 'usage', personal.id);
+    // Saved before Claude Switch could tell whose it was: Personal's saved login is another account's.
+    const other = withoutOrganization(fakeLogin('Other', { version: 3 }).credentialsRaw);
+    await store.updateLogin(personal.id, { credentialsRaw: other, account: loginB.account });
+    const kept = await engine.keepAsSignedIn(personal.id, folders, dir);
+    assert.equal(kept.email, 'other@example.test');
+    await assert.rejects(fs.access(path.join(dir, '.credentials.json')), 'lent for the question only');
+
+    // An account already saved under another name stays where it is.
+    await store.updateLogin(work.id, { credentialsRaw: withoutOrganization(fakeLogin('Other', { version: 4 }).credentialsRaw), account: loginA.account });
+    await assert.rejects(engine.adoptLogin(work.id, fakeLogin('Other', { version: 5 })), /already saved as "Personal"/);
+    await assert.rejects(engine.keepAsSignedIn(work.id, folders, dir), /default account/);
+  });
+
+  test('makes an account the one a new sign-in picked instead, and gives windows that use it the login', async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    const signedIn = fakeLogin('Other', { version: 2 });
+    const adopted = await engine.adoptLogin(personal.id, signedIn, folders);
+    assert.equal(adopted.alias, 'Personal');
+    assert.equal(adopted.email, 'other@example.test');
+    assert.deepEqual(await store.getLogin(personal.id), signedIn);
+    assert.equal(await folders.read(personal.id), signedIn.credentialsRaw);
+  });
+
+  test("keeps usage with the account Claude says the login is, and sees ~/.claude's mix-up by it", async () => {
+    // ~/.claude: Personal's tokens, in the newer format, next to Work's details.
+    await writeLive(paths, { credentialsRaw: withoutOrganization(fakeLogin('B', { version: 6 }).credentialsRaw), account: loginA.account });
+    assert.equal((await engine.detect()).kind, 'known', 'nothing in the files tells');
+    const utilization = { five_hour: { utilization: 100 }, seven_day: { utilization: 24 } };
+    assert.equal((await engine.checkUsage(async () => ({ utilization, owner: fakeAccount('B') }))).updated, true);
+    assert.equal(store.get(work.id)?.usage, undefined, "not Work's numbers");
+    assert.equal(store.get(personal.id)?.usage?.session?.percent, 100, "Personal's");
+    assert.equal(store.get(work.id)?.signedInAs, undefined, "a mix-up in ~/.claude, not Work's own login");
+    // Now known: ~/.claude is mixed up, so Personal's tokens are never saved as Work's.
+    assert.equal((await engine.detect()).kind, 'error');
+    await engine.refresh();
+    assert.equal((await store.getLogin(work.id))?.credentialsRaw, loginA.credentialsRaw);
+  });
+
+  test("puts back the default account's details that Claude on an account Claude Switch doesn't know wrote into .claude.json", async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    // Work's own login, in the newer format, next to the details of an account that isn't saved.
+    const workLogin = { credentialsRaw: withoutOrganization(loginA.credentialsRaw), account: loginA.account };
+    await store.updateLogin(work.id, workLogin);
+    await writeLive(paths, { credentialsRaw: workLogin.credentialsRaw, account: fakeAccount('Stranger') });
+    assert.equal((await engine.detect()).kind, 'error', 'the tokens are known to be Work’s');
+
+    const live = await engine.refresh(folders);
+    assert.equal(live.kind === 'known' && live.profile.id, work.id);
+    assert.deepEqual(await readSnapshot(paths), workLogin);
+  });
+
+  test("a switch confirms whose the live login is before saving it, and never saves another account's as its own", async () => {
+    const stray = withoutOrganization(fakeLogin('B', { version: 6 }).credentialsRaw);
+    await writeLive(paths, { credentialsRaw: stray, account: loginA.account });
+    await engine.switchTo(personal.id);
+    assert.equal((await store.getLogin(work.id))?.credentialsRaw, loginA.credentialsRaw, "Work's saved login stays its own");
+    assert.equal((await store.getBackup(store.listBackups()[0].slot))?.credentialsRaw, stray, 'a backup keeps it');
+  });
+
   test("keeps a usage check's numbers with the account whose login folder Claude used", async () => {
     const utilization = { five_hour: { utilization: 66 }, seven_day: { utilization: 12 } };
-    assert.equal(await engine.checkUsage(async () => utilization, personal.id), true);
+    assert.equal((await engine.checkUsage(async () => ({ utilization }), personal.id)).updated, true);
     assert.equal(store.get(personal.id)?.usage?.session?.percent, 66);
     assert.equal(store.get(work.id)?.usage, undefined, 'not the default account');
+  });
+
+  test('lends the saved login of an account no window uses to its usage check, and keeps what Claude refreshed', async () => {
+    const folders = new LoginFolders(path.join(home, 'storage', 'logins'));
+    const dir = path.join(home, 'storage', 'usage', personal.id);
+    const lent = path.join(dir, '.credentials.json');
+    const refreshed = fakeLogin('B', { version: 5 }).credentialsRaw;
+    const changed = await engine.checkUsage(
+      async () => {
+        // Claude finds Personal's saved login there, and refreshes it.
+        assert.equal(await fs.readFile(lent, 'utf8'), loginB.credentialsRaw);
+        await fs.writeFile(lent, refreshed);
+        return { utilization: { five_hour: { utilization: 21 }, seven_day: { utilization: 4 } } };
+      },
+      personal.id,
+      { folders, lendTo: dir },
+    );
+    assert.equal(changed.updated, true);
+    assert.equal(store.get(personal.id)?.usage?.session?.percent, 21);
+    assert.equal((await store.getLogin(personal.id))?.credentialsRaw, refreshed, 'the refreshed login is saved');
+    await assert.rejects(fs.access(lent), 'and kept in one place only');
+
+    // A check that VS Code closed during left newer tokens behind: they are saved before the next.
+    const newer = fakeLogin('B', { version: 7 }).credentialsRaw;
+    await fs.writeFile(lent, newer);
+    const sawNewer = async () => {
+      assert.equal(await fs.readFile(lent, 'utf8'), newer);
+      return { utilization: undefined };
+    };
+    await engine.checkUsage(sawNewer, personal.id, { folders, lendTo: dir });
+    assert.equal((await store.getLogin(personal.id))?.credentialsRaw, newer);
+
+    // Once a window uses it, or while it is the default account, its login is in use: never lent.
+    await engine.reconcileFolders(folders, work.id, new Set([personal.id]));
+    assert.equal((await engine.checkUsage(async () => assert.fail('no check'), personal.id, { folders, lendTo: dir })).updated, false);
+    assert.equal((await engine.checkUsage(async () => assert.fail('no check'), work.id, { folders, lendTo: dir })).updated, false);
+    await assert.rejects(fs.access(lent));
   });
 
   test("ignores Claude Code's usage cache while windows use other accounts", async () => {

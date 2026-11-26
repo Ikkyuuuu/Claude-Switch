@@ -230,6 +230,8 @@ body {
 
 .card-actions {
   align-self: flex-start;
+  display: flex;
+  gap: 2px;
   opacity: 0;
   transition: opacity 0.15s;
 }

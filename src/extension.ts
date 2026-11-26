@@ -66,7 +66,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Switch
   const store = new ProfileStore(context.globalState, context.secrets);
   // First, before Claude Code starts any claude process: this window's account.
   const window = windowContext(context, store, paths, storageDir, log);
-  const engine = new SwitchEngine(paths, store, log, { lockFile: path.join(storageDir, 'switch.lock') });
+  const engine: SwitchEngine = new SwitchEngine(paths, store, log, {
+    lockFile: path.join(storageDir, 'switch.lock'),
+    // Claude's CLI says whose a login is; the controller, made below, knows how to run it.
+    identify: (loginDir) => controller.identify(loginDir),
+  });
   const statusBar = new SwitchStatusBar();
   // A failed click shows its error in the tab rather than vanishing.
   const view = new AccountsView(store, log, context.extensionUri, (message) => {
@@ -94,6 +98,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Switch
         return controller.setRenewal(message.profileId);
       case 'signInAgain':
         return controller.signInAgain(message.profileId);
+      case 'keepSignedIn':
+        return controller.keepAsSignedIn(message.profileId);
       case 'openBilling':
         return controller.openBilling();
       case 'add':
